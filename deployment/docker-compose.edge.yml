@@ -7,8 +7,10 @@ services:
     restart: unless-stopped
     ports:
       - "8001:8001"
+    # Pass --env-file vision-service/.env when starting Docker Compose:
+    #   docker compose --env-file vision-service/.env -f deployment/docker-compose.edge.yml up -d
     environment:
-      - BACKEND_URL=${BACKEND_URL:-http://host.docker.internal:3000}
-      - EDGE_API_KEY=${EDGE_API_KEY:-dev-edge-key}
-      - YOLO_MODEL=yolov8n.pt
-      - YOLO_CONF=0.45
+      - BACKEND_URL=${BACKEND_URL:?BACKEND_URL must be set to your deployed Node.js backend URL}
+      - EDGE_API_KEY=${EDGE_API_KEY:?EDGE_API_KEY must be set to match the Node.js backend EDGE_API_KEY}
+      - YOLO_MODEL=${YOLO_MODEL:-yolov8n.pt}
+      - YOLO_CONF=${YOLO_CONF:-0.45}

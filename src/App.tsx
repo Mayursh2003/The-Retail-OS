@@ -19,8 +19,10 @@ function defaultRouteForRole(role: WorkspaceSnapshot['actor']['role']): string {
 
 function AppShell() {
   const [authReady, setAuthReady] = useState(false);
+  const [demoAuthEnabled, setDemoAuthEnabled] = useState(!import.meta.env.PROD);
   const [firebaseSignedIn, setFirebaseSignedIn] = useState(false);
   const [demoUserId, setDemoUserId] = useState<string | null>(() => {
+    if (import.meta.env.PROD) return null;
     const params = new URLSearchParams(window.location.search);
     if (params.get('autostart') === '1') {
       return 'usr-owner-bharat';
@@ -31,10 +33,12 @@ function AppShell() {
   const [loadingWorkspace, setLoadingWorkspace] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
+  const effectiveDemoUserId = demoAuthEnabled ? demoUserId : null;
+
   const session: AuthSessionHeaders | null = firebaseSignedIn
     ? { isDemoMode: false }
-    : demoUserId
-      ? { isDemoMode: true, demoUserId }
+    : effectiveDemoUserId
+      ? { isDemoMode: true, demoUserId: effectiveDemoUserId }
       : null;
 
   const loadWorkspace = useCallback(async (activeSession: AuthSessionHeaders) => {
@@ -57,6 +61,17 @@ function AppShell() {
 
   useEffect(() => {
     void testFirestoreConnection();
+    void apiClient
+      .getAuthConfig()
+      .then((cfg) => {
+        setDemoAuthEnabled(cfg.demoAuthEnabled);
+        if (!cfg.demoAuthEnabled) {
+          sessionStorage.removeItem('rb_demo_user_id');
+          setDemoUserId(null);
+        }
+      })
+      .catch(() => {});
+
     const fallbackTimer = window.setTimeout(() => {
       setAuthReady(true);
     }, 1200);
@@ -75,24 +90,33 @@ function AppShell() {
     if (!authReady) return;
     if (firebaseSignedIn) {
       void loadWorkspace({ isDemoMode: false });
-    } else if (demoUserId) {
-      void loadWorkspace({ isDemoMode: true, demoUserId });
+    } else if (effectiveDemoUserId) {
+      void loadWorkspace({ isDemoMode: true, demoUserId: effectiveDemoUserId });
     } else {
       setWorkspace(null);
     }
-  }, [authReady, firebaseSignedIn, demoUserId, loadWorkspace]);
+  }, [authReady, firebaseSignedIn, effectiveDemoUserId, loadWorkspace]);
 
-  // Real-time tenant & outlet-scoped WebSocket updates
+  // Authenticated real-time WebSocket channel (no role/tenant/outlet query params)
   useEffect(() => {
-    if (!workspace) return;
+    if (!workspace || !session) return;
+    let active = true;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const { actor } = workspace;
-    const params = new URLSearchParams({
-      role: actor.role,
-      tenantId: actor.tenantId,
-      outlets: actor.assignedOutletIds.join(','),
-    });
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws?${params.toString()}`);
+    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+    ws.onopen = async () => {
+      if (!active) return;
+      try {
+        if (!session.isDemoMode && auth.currentUser) {
+          const token = await auth.currentUser.getIdToken();
+          ws.send(JSON.stringify({ type: 'auth', token }));
+        } else if (session.isDemoMode && session.demoUserId && demoAuthEnabled) {
+          ws.send(JSON.stringify({ type: 'auth', demoUserId: session.demoUserId }));
+        }
+      } catch {
+        ws.close();
+      }
+    };
 
     ws.onmessage = (event) => {
       try {
@@ -103,9 +127,7 @@ function AppShell() {
           msg.type === 'session:updated' ||
           msg.type === 'camera:status'
         ) {
-          if (session) {
-            void loadWorkspace(session);
-          }
+          void loadWorkspace(session);
         }
       } catch {
         // Ignore malformed socket frames
@@ -113,11 +135,13 @@ function AppShell() {
     };
 
     return () => {
+      active = false;
       ws.close();
     };
-  }, [workspace?.actor.userId, workspace?.actor.role, workspace?.actor.tenantId]);
+  }, [workspace?.actor.userId, firebaseSignedIn, effectiveDemoUserId, demoAuthEnabled, loadWorkspace]);
 
   const handleEnterDemoRole = (userId: string) => {
+    if (!demoAuthEnabled) return;
     sessionStorage.setItem('rb_demo_user_id', userId);
     setDemoUserId(userId);
   };
@@ -142,7 +166,13 @@ function AppShell() {
   }
 
   if (!workspace || !session) {
-    return <LoginPage onEnterDemoRole={handleEnterDemoRole} authError={authError} />;
+    return (
+      <LoginPage
+        onEnterDemoRole={handleEnterDemoRole}
+        authError={authError}
+        demoAuthEnabled={demoAuthEnabled}
+      />
+    );
   }
 
   const refresh = async () => {

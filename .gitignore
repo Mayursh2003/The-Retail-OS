@@ -4,5 +4,11 @@ dist/
 coverage/
 .DS_Store
 *.log
-.env*
+.env
+.env.*
+vision-service/.env
+vision-service/.env.*
 !.env.example
+!vision-service/.env.example
+.data/
+.playwright-cli/

@@ -5,9 +5,14 @@ import { signInWithGoogle } from '../firebase';
 interface LoginPageProps {
   onEnterDemoRole: (demoUserId: string) => void;
   authError: string | null;
+  demoAuthEnabled: boolean;
 }
 
-export const LoginPage: React.FC<LoginPageProps> = ({ onEnterDemoRole, authError }) => {
+export const LoginPage: React.FC<LoginPageProps> = ({
+  onEnterDemoRole,
+  authError,
+  demoAuthEnabled,
+}) => {
   const [loadingGoogle, setLoadingGoogle] = useState(false);
   const [googleError, setGoogleError] = useState<string | null>(null);
 
@@ -52,7 +57,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onEnterDemoRole, authError
           <div>
             <h2 className="text-lg font-semibold text-slate-900">Sign in to your workspace</h2>
             <p className="text-sm text-slate-500 mt-1">
-              Authenticate via Firebase Google Sign-In or evaluate the platform in Demo Mode.
+              {demoAuthEnabled
+                ? 'Authenticate via Firebase Google Sign-In or evaluate the platform in Demo Mode.'
+                : 'Authenticate with your invited Firebase Google Workspace account.'}
             </p>
           </div>
 
@@ -73,94 +80,102 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onEnterDemoRole, authError
             </button>
           </div>
 
-          <div className="relative">
-            <div className="absolute inset-0 flex items-center" aria-hidden="true">
-              <div className="w-full border-t border-slate-200" />
+          {demoAuthEnabled ? (
+            <>
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center" aria-hidden="true">
+                  <div className="w-full border-t border-slate-200" />
+                </div>
+                <div className="relative flex justify-center text-xs">
+                  <span className="bg-white px-3 text-slate-500 font-medium">
+                    DEMO DATA · Role Access Evaluation
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-2.5">
+                <button
+                  type="button"
+                  onClick={() => onEnterDemoRole('usr-dev-admin')}
+                  className="w-full text-left border border-slate-200 rounded-xl p-3.5 hover:border-blue-500 hover:bg-slate-50 transition-colors flex items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-3">
+                    <Shield className="w-5 h-5 text-blue-600 shrink-0" />
+                    <div>
+                      <div className="text-sm font-semibold text-slate-900">
+                        Developer Console (Super Admin)
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        Global access · Clients, Outlets, Cameras, YOLOv8 Model &amp; System Health
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-xs font-mono text-blue-600 shrink-0">Enter &rarr;</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => onEnterDemoRole('usr-owner-bharat')}
+                  className="w-full text-left border border-slate-200 rounded-xl p-3.5 hover:border-blue-500 hover:bg-slate-50 transition-colors flex items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-3">
+                    <Building2 className="w-5 h-5 text-emerald-700 shrink-0" />
+                    <div>
+                      <div className="text-sm font-semibold text-slate-900">
+                        Business Owner — Bharat Fresh Mart
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        3 Outlets (Bengaluru) · Analytics, Payments, Reports &amp; Staff
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-xs font-mono text-emerald-700 shrink-0">Enter &rarr;</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => onEnterDemoRole('usr-worker-anita')}
+                  className="w-full text-left border border-slate-200 rounded-xl p-3.5 hover:border-blue-500 hover:bg-slate-50 transition-colors flex items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-3">
+                    <Store className="w-5 h-5 text-amber-700 shrink-0" />
+                    <div>
+                      <div className="text-sm font-semibold text-slate-900">
+                        Store Worker — Indiranagar Flagship
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        Restricted to 1 outlet · Live Camera, Today&apos;s Visitors &amp; Payment Confirmation
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-xs font-mono text-amber-700 shrink-0">Enter &rarr;</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => onEnterDemoRole('usr-owner-vastra')}
+                  className="w-full text-left border border-slate-200 rounded-xl p-3.5 hover:border-blue-500 hover:bg-slate-50 transition-colors flex items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-3">
+                    <UserCheck className="w-5 h-5 text-slate-700 shrink-0" />
+                    <div>
+                      <div className="text-sm font-semibold text-slate-900">
+                        Business Owner — Vastra Luxe Retail (Tenant Isolation Test)
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        1 Outlet (Mumbai) · Isolated from Bharat Fresh Mart records
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-xs font-mono text-slate-700 shrink-0">Enter &rarr;</span>
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="border border-slate-200 bg-slate-50 rounded-xl p-4 text-xs text-slate-600 leading-relaxed">
+              Production Security Mode Active: Demo workspace access is disabled. Sign in with an invited Google account provisioned by your Retail Brain OS administrator.
             </div>
-            <div className="relative flex justify-center text-xs">
-              <span className="bg-white px-3 text-slate-500 font-medium">
-                DEMO DATA · Role Access Evaluation
-              </span>
-            </div>
-          </div>
-
-          <div className="space-y-2.5">
-            <button
-              type="button"
-              onClick={() => onEnterDemoRole('usr-dev-admin')}
-              className="w-full text-left border border-slate-200 rounded-xl p-3.5 hover:border-blue-500 hover:bg-slate-50 transition-colors flex items-center justify-between gap-3"
-            >
-              <div className="flex items-center gap-3">
-                <Shield className="w-5 h-5 text-blue-600 shrink-0" />
-                <div>
-                  <div className="text-sm font-semibold text-slate-900">
-                    Developer Console (Super Admin)
-                  </div>
-                  <div className="text-xs text-slate-500">
-                    Global access · Clients, Outlets, Cameras, YOLOv8 Model &amp; System Health
-                  </div>
-                </div>
-              </div>
-              <span className="text-xs font-mono text-blue-600 shrink-0">Enter &rarr;</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onEnterDemoRole('usr-owner-bharat')}
-              className="w-full text-left border border-slate-200 rounded-xl p-3.5 hover:border-blue-500 hover:bg-slate-50 transition-colors flex items-center justify-between gap-3"
-            >
-              <div className="flex items-center gap-3">
-                <Building2 className="w-5 h-5 text-emerald-700 shrink-0" />
-                <div>
-                  <div className="text-sm font-semibold text-slate-900">
-                    Business Owner — Bharat Fresh Mart
-                  </div>
-                  <div className="text-xs text-slate-500">
-                    3 Outlets (Bengaluru) · Analytics, Payments, Reports &amp; Staff
-                  </div>
-                </div>
-              </div>
-              <span className="text-xs font-mono text-emerald-700 shrink-0">Enter &rarr;</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onEnterDemoRole('usr-worker-anita')}
-              className="w-full text-left border border-slate-200 rounded-xl p-3.5 hover:border-blue-500 hover:bg-slate-50 transition-colors flex items-center justify-between gap-3"
-            >
-              <div className="flex items-center gap-3">
-                <Store className="w-5 h-5 text-amber-700 shrink-0" />
-                <div>
-                  <div className="text-sm font-semibold text-slate-900">
-                    Store Worker — Indiranagar Flagship
-                  </div>
-                  <div className="text-xs text-slate-500">
-                    Restricted to 1 outlet · Live Camera, Today&apos;s Visitors &amp; Payment Confirmation
-                  </div>
-                </div>
-              </div>
-              <span className="text-xs font-mono text-amber-700 shrink-0">Enter &rarr;</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onEnterDemoRole('usr-owner-vastra')}
-              className="w-full text-left border border-slate-200 rounded-xl p-3.5 hover:border-blue-500 hover:bg-slate-50 transition-colors flex items-center justify-between gap-3"
-            >
-              <div className="flex items-center gap-3">
-                <UserCheck className="w-5 h-5 text-slate-700 shrink-0" />
-                <div>
-                  <div className="text-sm font-semibold text-slate-900">
-                    Business Owner — Vastra Luxe Retail (Tenant Isolation Test)
-                  </div>
-                  <div className="text-xs text-slate-500">
-                    1 Outlet (Mumbai) · Isolated from Bharat Fresh Mart records
-                  </div>
-                </div>
-              </div>
-              <span className="text-xs font-mono text-slate-700 shrink-0">Enter &rarr;</span>
-            </button>
-          </div>
+          )}
         </div>
       </div>
     </div>

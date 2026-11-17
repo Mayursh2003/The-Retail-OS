@@ -210,6 +210,7 @@ export interface UploadedTestVideo {
   streamUrl: string;
   uploadedAt: string;
   expiresAt: string;
+  visionServiceConfigured: boolean;
   visionServiceConnected: boolean;
   inferenceMode: 'python_yolov8_edge' | 'browser_demo_overlay';
 }
@@ -236,6 +237,14 @@ export interface ActorContext {
   isDemoMode: boolean;
 }
 
+export interface SecurityStatusSummary {
+  productionMode: boolean;
+  demoAuthEnabled: boolean;
+  edgeApiKeyConfigured: boolean;
+  cameraSecretKeyConfigured: boolean;
+  visionServiceConfigured: boolean;
+}
+
 export interface WorkspaceSnapshot {
   actor: ActorContext;
   tenants: Tenant[];
@@ -250,8 +259,13 @@ export interface WorkspaceSnapshot {
   auditLogs: AuditLog[];
   modelConfig: ModelConfig;
   visionServiceStatus: {
+    configured: boolean;
     connected: boolean;
+    inferenceMode: 'live_yolo' | 'demo_simulation';
     endpoint: string;
     message: string;
+    model?: string;
+    device?: string;
   };
+  securityStatus?: SecurityStatusSummary;
 }

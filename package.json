@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/utils/analytics.test.ts tests/firestore.rules.test.ts"
+    "test": "tsx --test src/utils/analytics.test.ts tests/firestore.rules.test.ts backend/security/config.test.ts",
+    "migrate:camera-keys": "tsx backend/scripts/migrateCameraSecrets.ts"
   },
   "dependencies": {
     "@firebase/eslint-plugin-security-rules": "^0.0.2",

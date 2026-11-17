@@ -55,8 +55,23 @@ async function requestJson<T>(
 }
 
 export const apiClient = {
+  getAuthConfig: async (): Promise<{ demoAuthEnabled: boolean; productionMode: boolean }> => {
+    const resp = await fetch('/api/auth/config');
+    if (!resp.ok) {
+      return { demoAuthEnabled: !import.meta.env.PROD, productionMode: import.meta.env.PROD };
+    }
+    return resp.json() as Promise<{ demoAuthEnabled: boolean; productionMode: boolean }>;
+  },
+
   getWorkspace: (session: AuthSessionHeaders) =>
     requestJson<WorkspaceSnapshot>('/api/workspace', session),
+
+  getCameraStreamUrl: (session: AuthSessionHeaders, cameraId: string) =>
+    requestJson<{ streamUrl: string; expiresAt: string }>(
+      `/api/cameras/${encodeURIComponent(cameraId)}/stream-token`,
+      session,
+      { method: 'POST' }
+    ),
 
   createTenant: (
     session: AuthSessionHeaders,

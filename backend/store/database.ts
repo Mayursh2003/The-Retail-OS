@@ -2,22 +2,21 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ActorContext, AuditLog } from '../../shared/types/domain';
+import {
+  decryptCameraCredential,
+  encryptCameraCredential,
+} from '../security/config';
 import { createInitialSeedState, type StoreState } from './seed';
 
 const DATA_DIR = path.resolve(process.cwd(), '.data');
 const STORE_FILE = path.join(DATA_DIR, 'retail-brain-store.json');
 
-const ENCRYPTION_KEY = crypto
-  .createHash('sha256')
-  .update(process.env.CAMERA_SECRET_KEY || 'retail-brain-local-dev-secret-key')
-  .digest();
-
 export function encryptCameraSecret(plaintext: string): string {
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', ENCRYPTION_KEY, iv);
-  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return `aes256gcm:${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`;
+  return encryptCameraCredential(plaintext);
+}
+
+export function decryptCameraSecret(ciphertext: string): string {
+  return decryptCameraCredential(ciphertext);
 }
 
 class RetailDatabase {

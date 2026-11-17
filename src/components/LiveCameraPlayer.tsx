@@ -16,6 +16,7 @@ import type {
   ModelConfig,
   Outlet,
   UploadedTestVideo,
+  WorkspaceSnapshot,
   ZoneType,
 } from '../../shared/types/domain';
 import { apiClient, type AuthSessionHeaders } from '../services/apiClient';
@@ -36,7 +37,7 @@ interface LiveCameraPlayerProps {
   cameras: Camera[];
   outlets: Outlet[];
   modelConfig: ModelConfig;
-  visionServiceStatus: { connected: boolean; endpoint: string; message: string };
+  visionServiceStatus: WorkspaceSnapshot['visionServiceStatus'];
   canEditZones: boolean;
   onCameraUpdated?: (camera: Camera) => void;
 }
@@ -57,6 +58,8 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
   const [uploadedVideo, setUploadedVideo] = useState<UploadedTestVideo | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [liveMjpegUrl, setLiveMjpegUrl] = useState<string | null>(null);
+  const [liveMjpegFailed, setLiveMjpegFailed] = useState(false);
   const [zoneDraftName, setZoneDraftName] = useState('New Product Zone');
   const [zoneDraftType, setZoneDraftType] = useState<ZoneType>('product');
   const [savingZone, setSavingZone] = useState(false);
@@ -73,6 +76,35 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
       setSelectedCameraId(cameras[0].cameraId);
     }
   }, [cameras, selectedCamera]);
+
+  useEffect(() => {
+    setLiveMjpegUrl(null);
+    setLiveMjpegFailed(false);
+    if (
+      !visionServiceStatus.connected ||
+      !selectedCamera ||
+      selectedCamera.connectionStatus === 'offline' ||
+      uploadedVideo
+    ) {
+      return;
+    }
+    let cancelled = false;
+    void apiClient
+      .getCameraStreamUrl(session, selectedCamera.cameraId)
+      .then((res) => {
+        if (!cancelled) {
+          setLiveMjpegUrl(res.streamUrl);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLiveMjpegFailed(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [visionServiceStatus.connected, selectedCamera?.cameraId, selectedCamera?.connectionStatus, uploadedVideo, session]);
 
   // Deterministic demo bounding boxes shown ONLY when clearly labelled as Demo Overlay (or uploaded video preview without Python service)
   const [tick, setTick] = useState(0);
@@ -260,23 +292,29 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
       {/* Honest Inference Source Banner */}
       <div className="bg-white border border-slate-200 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
         <div className="flex items-center gap-2">
-          {visionServiceStatus.connected ? (
-            <StatusText tone="success" label="Python YOLOv8n + ByteTrack Connected" />
+          {visionServiceStatus.connected && visionServiceStatus.inferenceMode === 'live_yolo' ? (
+            <StatusText
+              tone="success"
+              label={`Live YOLOv8n + ByteTrack Connected (${visionServiceStatus.device || 'Edge'})`}
+            />
           ) : (
             <StatusText
               tone="warning"
               label={
                 uploadedVideo
-                  ? 'Uploaded Video Playback · Demo Overlay Mode (Python Edge Offline)'
-                  : 'Demo Camera Feed Simulation · Connect Python Edge for Live RTSP Inference'
+                  ? 'Uploaded Video Playback · Demo Overlay (Not Real YOLO Inference)'
+                  : visionServiceStatus.configured
+                    ? 'VISION_SERVICE_URL Unreachable · Demo Simulation Only'
+                    : 'VISION_SERVICE_URL Not Configured · Demo Simulation Only'
               }
             />
           )}
         </div>
         <div className="flex items-center gap-4 text-slate-500 font-mono tabular-nums">
-          <span>Model: {modelConfig.modelName}</span>
+          <span>Mode: {visionServiceStatus.connected ? 'Live YOLO' : 'Demo Simulation'}</span>
+          <span>Model: {visionServiceStatus.model || modelConfig.modelName}</span>
           <span>Conf &ge; {modelConfig.confidenceThreshold}</span>
-          <span>Tracker: ByteTrack (Anonymous)</span>
+          <span>Tracker: ByteTrack</span>
         </div>
       </div>
 
@@ -434,6 +472,13 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
                     'Stream failed to respond. Verify local Python edge connector and DVR/NVR network.'}
                 </p>
               </div>
+            ) : visionServiceStatus.connected && liveMjpegUrl && !liveMjpegFailed ? (
+              <img
+                src={liveMjpegUrl}
+                alt={`Live YOLOv8 MJPEG stream for ${selectedCamera?.cameraName || 'camera'}`}
+                onError={() => setLiveMjpegFailed(true)}
+                className="w-full h-full object-contain bg-black"
+              />
             ) : (
               <div className="w-full h-full relative bg-slate-900 flex items-end justify-start p-4">
                 <div className="bg-slate-950/85 border border-slate-800 rounded-lg px-3.5 py-2.5 max-w-xl">
@@ -446,7 +491,7 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
                     </span>
                   </div>
                   <p className="text-xs text-slate-400 mt-1">
-                    Upload an MP4/AVI/MOV clip above to inspect real video frames, or connect the Python YOLOv8n edge service for live DVR/NVR playback.
+                    {visionServiceStatus.message}
                   </p>
                 </div>
               </div>

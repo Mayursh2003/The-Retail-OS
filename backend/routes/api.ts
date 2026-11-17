@@ -27,11 +27,26 @@ import {
 } from '../../src/utils/analytics';
 import {
   authenticateRequest,
+  AuthVerificationError,
   type AuthenticatedRequest,
   rateLimitMiddleware,
   requireRole,
+  resolveActorByUserId,
+  resolveActorFromFirebaseToken,
+  resolveDemoActor,
 } from '../middleware/auth';
-import { dbStore, encryptCameraSecret } from '../store/database';
+import {
+  createStreamTicket,
+  getEdgeApiKey,
+  getSecurityEnvChecklist,
+  getVisionServiceUrl,
+  isDemoAuthAllowed,
+  isProductionEnv,
+  validateCameraTenantOutlet,
+  verifyEdgeApiKey,
+  verifyStreamTicket,
+} from '../security/config';
+import { dbStore, decryptCameraSecret, encryptCameraSecret } from '../store/database';
 import { realtimeHub } from '../ws';
 
 const UPLOAD_DIR = '/tmp/retail-brain-uploads';
@@ -42,7 +57,14 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 // Temporary video upload tracking (strictly auto-expiring, never permanent archive)
 const uploadedVideos = new Map<
   string,
-  { filePath: string; mimeType: string; filename: string; expiresAt: number; tenantId: string }
+  {
+    filePath: string;
+    mimeType: string;
+    filename: string;
+    expiresAt: number;
+    tenantId: string;
+    outletId: string;
+  }
 >();
 
 const upload = multer({
@@ -59,36 +81,67 @@ const upload = multer({
   },
 });
 
-const VISION_SERVICE_URL = process.env.VISION_SERVICE_URL || 'http://127.0.0.1:8001';
-
 async function probeVisionService(): Promise<{
+  configured: boolean;
   connected: boolean;
+  inferenceMode: 'live_yolo' | 'demo_simulation';
   endpoint: string;
   message: string;
+  model?: string;
+  device?: string;
 }> {
+  const visionUrl = getVisionServiceUrl();
+  if (!visionUrl) {
+    return {
+      configured: false,
+      connected: false,
+      inferenceMode: 'demo_simulation',
+      endpoint: 'Not configured (set VISION_SERVICE_URL)',
+      message:
+        'VISION_SERVICE_URL is not configured on backend; live camera view uses Demo Simulation only.',
+    };
+  }
+
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 900);
+  const timer = setTimeout(() => controller.abort(), 1800);
   try {
-    const resp = await fetch(`${VISION_SERVICE_URL}/health`, { signal: controller.signal });
+    const edgeKey = getEdgeApiKey();
+    const resp = await fetch(`${visionUrl}/health`, {
+      signal: controller.signal,
+      headers: edgeKey ? { 'x-edge-api-key': edgeKey } : undefined,
+    });
     clearTimeout(timer);
     if (resp.ok) {
+      const info = (await resp.json().catch(() => ({}))) as {
+        model?: string;
+        device?: string;
+      };
       return {
+        configured: true,
         connected: true,
-        endpoint: VISION_SERVICE_URL,
-        message: 'Python YOLOv8n + ByteTrack edge service online',
+        inferenceMode: 'live_yolo',
+        endpoint: visionUrl,
+        model: info.model || 'yolov8n.pt',
+        device: info.device || 'CPU',
+        message: 'Python YOLOv8n + ByteTrack inference service online',
       };
     }
     return {
+      configured: true,
       connected: false,
-      endpoint: VISION_SERVICE_URL,
-      message: `Edge service returned HTTP ${resp.status}`,
+      inferenceMode: 'demo_simulation',
+      endpoint: visionUrl,
+      message: `Configured Python vision-service returned HTTP ${resp.status}; using Demo Simulation fallback.`,
     };
   } catch {
     clearTimeout(timer);
     return {
+      configured: true,
       connected: false,
-      endpoint: VISION_SERVICE_URL,
-      message: 'Python vision-service not running locally; video playback uses explicit Demo Overlay mode.',
+      inferenceMode: 'demo_simulation',
+      endpoint: visionUrl,
+      message:
+        'Configured VISION_SERVICE_URL is unreachable from backend; using Demo Overlay simulation.',
     };
   }
 }
@@ -111,9 +164,29 @@ function probeTcpSocket(host: string, port: number, timeoutMs = 1800): Promise<{
   });
 }
 
+async function resolveOptionalRequestActor(req: express.Request) {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return resolveActorFromFirebaseToken(authHeader.slice(7).trim());
+  }
+  const demoMode = req.headers['x-demo-mode'] === 'true';
+  const demoUserId = req.headers['x-demo-user-id'] as string | undefined;
+  if (demoMode && demoUserId && isDemoAuthAllowed()) {
+    return resolveDemoActor(demoUserId);
+  }
+  return null;
+}
+
 export function createApiRouter(): express.Router {
   const router = express.Router();
   router.use(rateLimitMiddleware);
+
+  router.get('/auth/config', (_req, res) => {
+    res.json({
+      demoAuthEnabled: isDemoAuthAllowed(),
+      productionMode: isProductionEnv(),
+    });
+  });
 
   router.get('/health', async (_req, res) => {
     const vision = await probeVisionService();
@@ -122,17 +195,50 @@ export function createApiRouter(): express.Router {
       service: 'retail-brain-os-backend',
       wsClients: realtimeHub.getClientCount(),
       visionService: vision,
+      securityStatus: getSecurityEnvChecklist(),
       timestamp: new Date().toISOString(),
     });
   });
 
-  // Stream uploaded temporary test video with HTTP Range support (before auth header requirement so <video src> works cleanly)
-  router.get('/vision/stream/:uploadId', (req, res: Response) => {
+  // Protected stream for temporary uploaded test video (requires Bearer/dev session OR scoped HMAC ticket)
+  router.get('/vision/stream/:uploadId', async (req, res: Response) => {
     const item = uploadedVideos.get(req.params.uploadId);
-    if (!item || !fs.existsSync(item.filePath)) {
+    if (!item || !fs.existsSync(item.filePath) || item.expiresAt < Date.now()) {
       res.status(404).json({ error: 'Temporary video expired or not found.' });
       return;
     }
+
+    let authorized = false;
+    try {
+      const ticketParam = typeof req.query.ticket === 'string' ? req.query.ticket : undefined;
+      if (ticketParam) {
+        const ticket = verifyStreamTicket(ticketParam, 'upload', req.params.uploadId);
+        if (
+          ticket &&
+          ticket.tenantId === item.tenantId &&
+          ticket.outletId === item.outletId &&
+          resolveActorByUserId(ticket.userId)
+        ) {
+          authorized = true;
+        }
+      } else {
+        const actor = await resolveOptionalRequestActor(req);
+        if (actor && checkOutletAccess(actor, item.tenantId, item.outletId)) {
+          authorized = true;
+        }
+      }
+    } catch (err) {
+      if (err instanceof AuthVerificationError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+    }
+
+    if (!authorized) {
+      res.status(401).json({ error: 'Authentication or valid stream ticket required.' });
+      return;
+    }
+
     const stat = fs.statSync(item.filePath);
     const total = stat.size;
     const range = req.headers.range;
@@ -157,14 +263,129 @@ export function createApiRouter(): express.Router {
     fs.createReadStream(item.filePath).pipe(res);
   });
 
-  // Edge Connector Webhook for Python vision-service detection events
-  router.post('/vision/events', (req, res) => {
-    const edgeKey = req.headers['x-edge-api-key'] as string | undefined;
-    const expectedKey = process.env.EDGE_API_KEY || 'dev-edge-key';
-    if (edgeKey && edgeKey !== expectedKey) {
-      res.status(403).json({ error: 'Invalid edge connector key.' });
+  // Protected MJPEG camera proxy stream (requires Bearer/dev auth OR scoped HMAC stream ticket; never exposes RTSP URLs to browser)
+  router.get('/cameras/:cameraId/stream/mjpeg', async (req, res: Response) => {
+    const state = dbStore.getState();
+    const camera = state.cameras.find((c) => c.cameraId === req.params.cameraId);
+    if (!camera) {
+      res.status(404).json({ error: 'Camera not found.' });
       return;
     }
+
+    const integrity = validateCameraTenantOutlet({
+      cameras: state.cameras,
+      outlets: state.outlets,
+      cameraId: camera.cameraId,
+      tenantId: camera.tenantId,
+      outletId: camera.outletId,
+    });
+    if (!integrity.ok) {
+      res.status(403).json({ error: integrity.error });
+      return;
+    }
+
+    let authorized = false;
+    try {
+      const ticketParam = typeof req.query.ticket === 'string' ? req.query.ticket : undefined;
+      if (ticketParam) {
+        const ticket = verifyStreamTicket(ticketParam, 'mjpeg', camera.cameraId);
+        if (ticket && ticket.tenantId === camera.tenantId && ticket.outletId === camera.outletId) {
+          const actor = resolveActorByUserId(ticket.userId);
+          if (actor && checkOutletAccess(actor, camera.tenantId, camera.outletId)) {
+            authorized = true;
+          }
+        }
+      } else {
+        const actor = await resolveOptionalRequestActor(req);
+        if (actor && checkOutletAccess(actor, camera.tenantId, camera.outletId)) {
+          authorized = true;
+        }
+      }
+    } catch (err) {
+      if (err instanceof AuthVerificationError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+    }
+
+    if (!authorized) {
+      res.status(401).json({ error: 'Authentication and outlet access required for MJPEG stream.' });
+      return;
+    }
+
+    const visionUrl = getVisionServiceUrl();
+    const edgeKey = getEdgeApiKey();
+    if (!visionUrl || !edgeKey) {
+      res.status(503).json({
+        error: 'VISION_SERVICE_URL and EDGE_API_KEY must be configured on backend for live MJPEG streaming.',
+      });
+      return;
+    }
+
+    let rtspSourceHeader: string | undefined;
+    if (camera.sourceType === 'RTSP') {
+      const encrypted = state.cameraSecrets[camera.cameraId];
+      if (!encrypted) {
+        res.status(404).json({ error: 'Camera credentials not provisioned.' });
+        return;
+      }
+      if (encrypted.startsWith('aes256gcm:')) {
+        try {
+          rtspSourceHeader = decryptCameraSecret(encrypted);
+        } catch (err) {
+          res.status(503).json({
+            error: err instanceof Error ? err.message : 'Unable to decrypt camera stream credentials.',
+          });
+          return;
+        }
+      } else {
+        res.status(422).json({
+          error: 'Demo placeholder camera endpoint has no live RTSP stream credentials.',
+        });
+        return;
+      }
+    }
+
+    try {
+      const upstream = await fetch(`${visionUrl}/streams/${encodeURIComponent(camera.cameraId)}/mjpeg`, {
+        headers: {
+          'x-edge-api-key': edgeKey,
+          ...(rtspSourceHeader ? { 'x-rtsp-source': rtspSourceHeader } : {}),
+        },
+      });
+      if (!upstream.ok || !upstream.body) {
+        res.status(upstream.status || 502).json({ error: 'Upstream vision MJPEG stream unavailable.' });
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': upstream.headers.get('content-type') || 'multipart/x-mixed-replace; boundary=frame',
+        'Cache-Control': 'no-store',
+      });
+      const reader = upstream.body.getReader();
+      req.on('close', () => {
+        void reader.cancel().catch(() => {});
+      });
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(value);
+      }
+      res.end();
+    } catch {
+      if (!res.headersSent) {
+        res.status(502).json({ error: 'Failed to connect to Python vision-service MJPEG endpoint.' });
+      }
+    }
+  });
+
+  // Edge Connector Webhook for Python vision-service detection events (strict EDGE_API_KEY + camera integrity)
+  router.post('/vision/events', (req, res) => {
+    const keyCheck = verifyEdgeApiKey(req.headers['x-edge-api-key'] as string | undefined);
+    if (!keyCheck.ok) {
+      res.status(keyCheck.status).json({ error: keyCheck.error });
+      return;
+    }
+
     const body = req.body as Partial<DetectionEvent> & {
       dwellSeconds?: number;
       sessionStatus?: VisitSession['sessionStatus'];
@@ -173,7 +394,21 @@ export function createApiRouter(): express.Router {
       res.status(400).json({ error: 'Missing required detection event fields.' });
       return;
     }
+
     const state = dbStore.getState();
+    const camCheck = validateCameraTenantOutlet({
+      cameras: state.cameras,
+      outlets: state.outlets,
+      cameraId: body.cameraId,
+      tenantId: body.tenantId,
+      outletId: body.outletId,
+      allowUploadPlaceholder: true,
+    });
+    if (!camCheck.ok) {
+      res.status(403).json({ error: camCheck.error });
+      return;
+    }
+
     const nowIso = new Date().toISOString();
     const sessionId = body.sessionId || `S-${body.temporaryTrackId}`;
 
@@ -237,6 +472,7 @@ export function createApiRouter(): express.Router {
     res.json({
       ...scoped,
       visionServiceStatus,
+      securityStatus: getSecurityEnvChecklist(),
     });
   });
 
@@ -551,6 +787,42 @@ export function createApiRouter(): express.Router {
   // ------------------------------------------------------------------
   // Camera Management & Connection Testing (No RTSP passwords exposed!)
   // ------------------------------------------------------------------
+  router.post('/cameras/:cameraId/stream-token', (req: AuthenticatedRequest, res) => {
+    const actor = req.actor!;
+    const state = dbStore.getState();
+    const camera = state.cameras.find((c) => c.cameraId === req.params.cameraId);
+    if (!camera) {
+      res.status(404).json({ error: 'Camera not found.' });
+      return;
+    }
+    const integrity = validateCameraTenantOutlet({
+      cameras: state.cameras,
+      outlets: state.outlets,
+      cameraId: camera.cameraId,
+      tenantId: camera.tenantId,
+      outletId: camera.outletId,
+    });
+    if (!integrity.ok) {
+      res.status(403).json({ error: integrity.error });
+      return;
+    }
+    if (!checkOutletAccess(actor, camera.tenantId, camera.outletId)) {
+      res.status(403).json({ error: 'Outlet access denied for this camera.' });
+      return;
+    }
+    const ticket = createStreamTicket({
+      kind: 'mjpeg',
+      resourceId: camera.cameraId,
+      userId: actor.userId,
+      tenantId: camera.tenantId,
+      outletId: camera.outletId,
+    });
+    res.json({
+      streamUrl: `/api/cameras/${encodeURIComponent(camera.cameraId)}/stream/mjpeg?ticket=${encodeURIComponent(ticket)}`,
+      expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    });
+  });
+
   router.post('/cameras', requireRole('DEVELOPER', 'CLIENT_OWNER'), (req: AuthenticatedRequest, res) => {
     const actor = req.actor!;
     const { outletId, cameraName, sourceType, rtspUrl, resolution, fps } = req.body as {
@@ -589,7 +861,17 @@ export function createApiRouter(): express.Router {
           : 'upload://temporary-mp4-buffer';
 
     if (sourceType === 'RTSP' && rtspUrl) {
-      state.cameraSecrets[cameraId] = encryptCameraSecret(rtspUrl.trim());
+      try {
+        state.cameraSecrets[cameraId] = encryptCameraSecret(rtspUrl.trim());
+      } catch (err) {
+        res.status(503).json({
+          error:
+            err instanceof Error
+              ? err.message
+              : 'CAMERA_SECRET_KEY is not configured; cannot save RTSP credentials.',
+        });
+        return;
+      }
     }
 
     const camera: Camera = {
@@ -661,6 +943,17 @@ export function createApiRouter(): express.Router {
       res.status(404).json({ error: 'Camera not found.' });
       return;
     }
+    const integrity = validateCameraTenantOutlet({
+      cameras: state.cameras,
+      outlets: state.outlets,
+      cameraId: camera.cameraId,
+      tenantId: camera.tenantId,
+      outletId: camera.outletId,
+    });
+    if (!integrity.ok) {
+      res.status(403).json({ error: integrity.error });
+      return;
+    }
     if (!checkTenantAccess(actor, camera.tenantId)) {
       res.status(403).json({ error: 'Forbidden.' });
       return;
@@ -726,6 +1019,17 @@ export function createApiRouter(): express.Router {
       res.status(404).json({ error: 'Camera not found.' });
       return;
     }
+    const integrity = validateCameraTenantOutlet({
+      cameras: state.cameras,
+      outlets: state.outlets,
+      cameraId: camera.cameraId,
+      tenantId: camera.tenantId,
+      outletId: camera.outletId,
+    });
+    if (!integrity.ok) {
+      res.status(403).json({ error: integrity.error });
+      return;
+    }
     if (!checkTenantAccess(actor, camera.tenantId)) {
       res.status(403).json({ error: 'Forbidden.' });
       return;
@@ -741,13 +1045,12 @@ export function createApiRouter(): express.Router {
       const port = Number(hostMatch?.[2] || 554);
 
       if (host.startsWith('192.168.') || host.startsWith('10.')) {
-        // Private LAN address unreachable directly from cloud container; report honest edge requirement or toggle demo health
         probeResult = {
           ok: false,
           latencyMs: 12,
-          reason: `Private LAN ${host}:${port} requires the local Python Edge Connector to initiate outbound WebSocket telemetry.`,
+          reason: `Private LAN ${host}:${port} requires the local Python Edge Connector to initiate outbound HTTPS/WebSocket telemetry.`,
         };
-        if (camera.isDemoData && req.body?.simulateEdgeRecovery === true) {
+        if (isDemoAuthAllowed() && camera.isDemoData && req.body?.simulateEdgeRecovery === true) {
           probeResult = { ok: true, latencyMs: 18 };
         }
       } else {
@@ -1037,7 +1340,12 @@ export function createApiRouter(): express.Router {
       const outletId = String(req.body?.outletId || actor.assignedOutletIds[0] || '');
       const state = dbStore.getState();
       const outlet = state.outlets.find((o) => o.outletId === outletId);
-      if (outlet && !checkOutletAccess(actor, outlet.tenantId, outlet.outletId)) {
+      if (!outlet) {
+        fs.unlinkSync(file.path);
+        res.status(404).json({ error: 'Target outlet not found.' });
+        return;
+      }
+      if (!checkOutletAccess(actor, outlet.tenantId, outlet.outletId)) {
         fs.unlinkSync(file.path);
         res.status(403).json({ error: 'Outlet access denied.' });
         return;
@@ -1051,7 +1359,8 @@ export function createApiRouter(): express.Router {
         mimeType: file.mimetype || 'video/mp4',
         filename: file.originalname,
         expiresAt,
-        tenantId: outlet?.tenantId || actor.tenantId,
+        tenantId: outlet.tenantId,
+        outletId: outlet.outletId,
       });
 
       // Auto-purge temporary upload file after 30 minutes
@@ -1063,11 +1372,22 @@ export function createApiRouter(): express.Router {
         uploadedVideos.delete(uploadId);
       }, ttlMs).unref();
 
+      const ticket = createStreamTicket(
+        {
+          kind: 'upload',
+          resourceId: uploadId,
+          userId: actor.userId,
+          tenantId: outlet.tenantId,
+          outletId: outlet.outletId,
+        },
+        ttlMs
+      );
+
       const visionStatus = await probeVisionService();
       dbStore.appendAudit({
         userId: actor.userId,
         userEmail: actor.email,
-        tenantId: outlet?.tenantId || actor.tenantId,
+        tenantId: outlet.tenantId,
         action: 'TEST_VIDEO_UPLOADED',
         resource: `vision/uploads/${uploadId}`,
         details: `Uploaded temporary test file ${file.originalname} (${Math.round(file.size / 1024)} KB)`,
@@ -1075,14 +1395,15 @@ export function createApiRouter(): express.Router {
 
       res.status(201).json({
         uploadId,
-        tenantId: outlet?.tenantId || actor.tenantId,
-        outletId: outlet?.outletId || outletId,
+        tenantId: outlet.tenantId,
+        outletId: outlet.outletId,
         filename: file.originalname,
         mimeType: file.mimetype || 'video/mp4',
         sizeBytes: file.size,
-        streamUrl: `/api/vision/stream/${uploadId}`,
+        streamUrl: `/api/vision/stream/${uploadId}?ticket=${encodeURIComponent(ticket)}`,
         uploadedAt: new Date().toISOString(),
         expiresAt: new Date(expiresAt).toISOString(),
+        visionServiceConfigured: visionStatus.configured,
         visionServiceConnected: visionStatus.connected,
         inferenceMode: visionStatus.connected ? 'python_yolov8_edge' : 'browser_demo_overlay',
       });

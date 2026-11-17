@@ -720,7 +720,13 @@ export const DeveloperConsole: React.FC<DeveloperConsoleProps> = ({
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <KpiCard
                   label="Python Vision Service"
-                  value={visionServiceStatus.connected ? 'Connected' : 'Offline'}
+                  value={
+                    visionServiceStatus.connected
+                      ? 'Connected (Live YOLO)'
+                      : visionServiceStatus.configured
+                        ? 'Configured · Offline'
+                        : 'Not Configured'
+                  }
                   tone={visionServiceStatus.connected ? 'success' : 'warning'}
                   subtext={visionServiceStatus.endpoint}
                 />
@@ -737,6 +743,44 @@ export const DeveloperConsole: React.FC<DeveloperConsoleProps> = ({
                   subtext="Rules deployed & linted"
                 />
               </div>
+
+              {workspace.securityStatus && (
+                <div className="bg-white border border-slate-200 rounded-xl p-5">
+                  <h2 className="text-sm font-semibold text-slate-900 mb-3">
+                    Backend Environment &amp; Security Readiness (No Secrets Exposed)
+                  </h2>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                    <div className="border border-slate-200 rounded-lg p-3 flex items-center justify-between">
+                      <span className="font-mono text-slate-700">EDGE_API_KEY</span>
+                      <StatusText
+                        tone={workspace.securityStatus.edgeApiKeyConfigured ? 'success' : 'warning'}
+                        label={workspace.securityStatus.edgeApiKeyConfigured ? 'CONFIGURED' : 'MISSING'}
+                      />
+                    </div>
+                    <div className="border border-slate-200 rounded-lg p-3 flex items-center justify-between">
+                      <span className="font-mono text-slate-700">CAMERA_SECRET_KEY</span>
+                      <StatusText
+                        tone={workspace.securityStatus.cameraSecretKeyConfigured ? 'success' : 'warning'}
+                        label={workspace.securityStatus.cameraSecretKeyConfigured ? 'CONFIGURED' : 'MISSING'}
+                      />
+                    </div>
+                    <div className="border border-slate-200 rounded-lg p-3 flex items-center justify-between">
+                      <span className="font-mono text-slate-700">VISION_SERVICE_URL</span>
+                      <StatusText
+                        tone={workspace.securityStatus.visionServiceConfigured ? 'success' : 'warning'}
+                        label={workspace.securityStatus.visionServiceConfigured ? 'CONFIGURED' : 'MISSING'}
+                      />
+                    </div>
+                    <div className="border border-slate-200 rounded-lg p-3 flex items-center justify-between">
+                      <span className="font-mono text-slate-700">Demo Auth Mode</span>
+                      <StatusText
+                        tone={workspace.securityStatus.demoAuthEnabled ? 'warning' : 'success'}
+                        label={workspace.securityStatus.demoAuthEnabled ? 'DEV ONLY' : 'LOCKED'}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="bg-white border border-slate-200 rounded-xl p-5">
                 <h2 className="text-sm font-semibold text-slate-900 mb-3">
@@ -784,15 +828,17 @@ export const DeveloperConsole: React.FC<DeveloperConsoleProps> = ({
                       YOLOv8n + ByteTrack Inference Configuration
                     </h2>
                     <p className="text-xs text-slate-500 mt-0.5">
-                      Real model telemetry only — never reports fabricated GPU outputs when the Python edge service is offline.
+                      {visionServiceStatus.message}
                     </p>
                   </div>
                   <StatusText
                     tone={visionServiceStatus.connected ? 'success' : 'warning'}
                     label={
                       visionServiceStatus.connected
-                        ? 'Edge Inference Connected'
-                        : 'Edge Service Disconnected'
+                        ? 'Live YOLO Inference Connected'
+                        : visionServiceStatus.configured
+                          ? 'Configured Edge Offline (Demo Overlay)'
+                          : 'Demo Simulation Mode (Set VISION_SERVICE_URL)'
                     }
                   />
                 </div>
@@ -802,7 +848,7 @@ export const DeveloperConsole: React.FC<DeveloperConsoleProps> = ({
                   <KpiCard label="Tracker" value={modelConfig.trackerType} subtext="Session-only TRK IDs" />
                   <KpiCard
                     label="Device Type"
-                    value={visionServiceStatus.connected ? modelConfig.deviceType : 'Not Connected'}
+                    value={visionServiceStatus.connected ? visionServiceStatus.device || modelConfig.deviceType : 'Not Connected'}
                   />
                   <KpiCard
                     label="Inference Latency"
