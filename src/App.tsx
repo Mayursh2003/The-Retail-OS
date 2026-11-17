@@ -120,11 +120,55 @@ function AppShell() {
 
     ws.onmessage = (event) => {
       try {
-        const msg = JSON.parse(event.data) as { type: string };
+        const msg = JSON.parse(event.data) as {
+          type: string;
+          payload?: Record<string, unknown>;
+        };
+        if (msg.type === 'detection:event' && msg.payload) {
+          const det = msg.payload as unknown as WorkspaceSnapshot['detectionEvents'][number];
+          setWorkspace((prev) => {
+            if (!prev) return prev;
+            const nextEvents = [det, ...prev.detectionEvents.filter((e) => e.eventId !== det.eventId)].slice(0, 300);
+            return {
+              ...prev,
+              detectionEvents: nextEvents,
+              modelConfig: {
+                ...prev.modelConfig,
+                inferenceStatus: 'live_edge',
+                lastInferenceMs:
+                  typeof det.latencyMs === 'number'
+                    ? Math.round(det.latencyMs)
+                    : prev.modelConfig.lastInferenceMs,
+              },
+              visionServiceStatus: {
+                ...prev.visionServiceStatus,
+                connected: true,
+                inferenceState: 'live_yolo',
+                inferenceMode: 'live_yolo',
+                lastVerifiedInferenceAt: det.timestamp,
+              },
+            };
+          });
+          return;
+        }
+        if (msg.type === 'session:updated' && msg.payload) {
+          const sess = msg.payload as unknown as WorkspaceSnapshot['visitSessions'][number];
+          setWorkspace((prev) => {
+            if (!prev) return prev;
+            const exists = prev.visitSessions.some((s) => s.sessionId === sess.sessionId);
+            const nextSessions = exists
+              ? prev.visitSessions.map((s) => (s.sessionId === sess.sessionId ? sess : s))
+              : [sess, ...prev.visitSessions];
+            return {
+              ...prev,
+              visitSessions: nextSessions,
+            };
+          });
+          return;
+        }
         if (
           msg.type === 'transaction:confirmed' ||
           msg.type === 'transaction:updated' ||
-          msg.type === 'session:updated' ||
           msg.type === 'camera:status'
         ) {
           void loadWorkspace(session);

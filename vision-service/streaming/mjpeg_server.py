@@ -13,6 +13,7 @@ def draw_annotations(
     tracks: List[TrackedPerson],
     zones: List[ZonePolygon],
     fps: float,
+    inference_ms: float = 0.0,
 ) -> np.ndarray:
     annotated = frame.copy()
     h, w = annotated.shape[:2]
@@ -23,7 +24,7 @@ def draw_annotations(
             dtype=np.int32,
         )
         if len(pts) >= 3:
-            color = (37, 99, 235) if zone.zone_type == "billing" else (16, 185, 129)
+            color = (235, 99, 37) if zone.zone_type == "billing" else (129, 185, 16)
             cv2.polylines(annotated, [pts], isClosed=True, color=color, thickness=2)
             cv2.putText(
                 annotated,
@@ -37,26 +38,41 @@ def draw_annotations(
 
     for t in tracks:
         x1, y1, x2, y2 = t.bbox
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), (59, 130, 246), 2)
-        label = f"{t.temporary_track_id} ({t.confidence:.2f})"
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (246, 130, 59), 2)
+        label = f"{t.temporary_track_id} ({int(t.confidence * 100)}%)"
+        label_y = max(22, y1 - 8)
+        cv2.rectangle(
+            annotated,
+            (x1, max(0, label_y - 20)),
+            (min(w - 1, x1 + max(130, len(label) * 10)), label_y + 4),
+            (30, 41, 59),
+            -1,
+        )
         cv2.putText(
             annotated,
             label,
-            (x1, max(18, y1 - 8)),
+            (x1 + 4, label_y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (255, 255, 255),
-            2,
+            0.52,
+            (248, 250, 252),
+            1,
+            cv2.LINE_AA,
         )
 
+    header_text = (
+        f"YOLOv8n + ByteTrack | {len(tracks)} persons | {fps:.1f} FPS"
+        + (f" | {inference_ms:.0f}ms" if inference_ms > 0 else "")
+    )
+    cv2.rectangle(annotated, (8, 8), (min(w - 8, 560), 36), (15, 23, 42), -1)
     cv2.putText(
         annotated,
-        f"YOLOv8n + ByteTrack | {len(tracks)} persons | {fps:.1f} FPS",
+        header_text,
         (14, 28),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        (16, 185, 129),
+        0.58,
+        (52, 211, 153),
         2,
+        cv2.LINE_AA,
     )
     return annotated
 

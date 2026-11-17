@@ -545,6 +545,7 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({
               outlets={outlets}
               modelConfig={modelConfig}
               visionServiceStatus={visionServiceStatus}
+              detectionEvents={workspace.detectionEvents}
               canEditZones={true}
               onCameraUpdated={() => {
                 void onRefresh();

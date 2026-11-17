@@ -255,7 +255,13 @@ export const WorkerDashboard: React.FC<WorkerDashboardProps> = ({
                 outlets={currentOutlet ? [currentOutlet] : outlets}
                 modelConfig={modelConfig}
                 visionServiceStatus={visionServiceStatus}
+                detectionEvents={workspace.detectionEvents.filter(
+                  (e) => !currentOutlet || e.outletId === currentOutlet.outletId
+                )}
                 canEditZones={false}
+                onCameraUpdated={() => {
+                  void onRefresh();
+                }}
               />
             }
           />

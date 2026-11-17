@@ -146,6 +146,20 @@ test('stream tickets enforce resource binding, kind binding, expiration, and sig
     env
   );
   assert.equal(verifyStreamTicket(expired, 'upload', 'up-01', env), null);
+
+  const annotatedTicket = createStreamTicket(
+    {
+      kind: 'upload-annotated',
+      resourceId: 'up-99',
+      userId: 'user-owner',
+      tenantId: 'tenant-1',
+      outletId: 'outlet-1',
+    },
+    60_000,
+    env
+  );
+  assert.ok(verifyStreamTicket(annotatedTicket, 'upload-annotated', 'up-99', env));
+  assert.equal(verifyStreamTicket(annotatedTicket, 'upload', 'up-99', env), null);
 });
 
 test('validateCameraTenantOutlet blocks cross-tenant and cross-outlet camera spoofing', () => {

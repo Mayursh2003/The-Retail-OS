@@ -59,6 +59,7 @@ const uploadedVideos = new Map<
   string,
   {
     filePath: string;
+    annotatedFilePath?: string;
     mimeType: string;
     filename: string;
     expiresAt: number;
@@ -66,6 +67,17 @@ const uploadedVideos = new Map<
     outletId: string;
   }
 >();
+
+let lastVerifiedYoloInferenceAt: string | null = null;
+
+function markVerifiedYoloInference(nowIso = new Date().toISOString()): void {
+  lastVerifiedYoloInferenceAt = nowIso;
+}
+
+function hasRecentVerifiedYoloInference(): boolean {
+  if (!lastVerifiedYoloInferenceAt) return false;
+  return Date.now() - new Date(lastVerifiedYoloInferenceAt).getTime() < 15 * 60_000;
+}
 
 const upload = multer({
   dest: UPLOAD_DIR,
@@ -84,17 +96,20 @@ const upload = multer({
 async function probeVisionService(): Promise<{
   configured: boolean;
   connected: boolean;
+  inferenceState: 'live_yolo' | 'processing' | 'demo_overlay' | 'offline' | 'error';
   inferenceMode: 'live_yolo' | 'demo_simulation';
   endpoint: string;
   message: string;
   model?: string;
   device?: string;
+  lastVerifiedInferenceAt?: string;
 }> {
   const visionUrl = getVisionServiceUrl();
   if (!visionUrl) {
     return {
       configured: false,
       connected: false,
+      inferenceState: 'offline',
       inferenceMode: 'demo_simulation',
       endpoint: 'Not configured (set VISION_SERVICE_URL)',
       message:
@@ -116,19 +131,25 @@ async function probeVisionService(): Promise<{
         model?: string;
         device?: string;
       };
+      const verified = hasRecentVerifiedYoloInference();
       return {
         configured: true,
         connected: true,
-        inferenceMode: 'live_yolo',
+        inferenceState: verified ? 'live_yolo' : 'demo_overlay',
+        inferenceMode: verified ? 'live_yolo' : 'demo_simulation',
         endpoint: visionUrl,
         model: info.model || 'yolov8n.pt',
         device: info.device || 'CPU',
-        message: 'Python YOLOv8n + ByteTrack inference service online',
+        lastVerifiedInferenceAt: lastVerifiedYoloInferenceAt || undefined,
+        message: verified
+          ? 'Python YOLOv8n + ByteTrack inference verified'
+          : 'Python vision-service reachable on standby; upload a test video or start an edge camera stream to run live YOLOv8n inference.',
       };
     }
     return {
       configured: true,
       connected: false,
+      inferenceState: 'offline',
       inferenceMode: 'demo_simulation',
       endpoint: visionUrl,
       message: `Configured Python vision-service returned HTTP ${resp.status}; using Demo Simulation fallback.`,
@@ -138,6 +159,7 @@ async function probeVisionService(): Promise<{
     return {
       configured: true,
       connected: false,
+      inferenceState: 'offline',
       inferenceMode: 'demo_simulation',
       endpoint: visionUrl,
       message:
@@ -200,10 +222,14 @@ export function createApiRouter(): express.Router {
     });
   });
 
-  // Protected stream for temporary uploaded test video (requires Bearer/dev session OR scoped HMAC ticket)
-  router.get('/vision/stream/:uploadId', async (req, res: Response) => {
+  async function authorizeAndStreamUpload(
+    req: express.Request,
+    res: Response,
+    kind: 'upload' | 'upload-annotated'
+  ): Promise<void> {
     const item = uploadedVideos.get(req.params.uploadId);
-    if (!item || !fs.existsSync(item.filePath) || item.expiresAt < Date.now()) {
+    const targetPath = kind === 'upload-annotated' ? item?.annotatedFilePath : item?.filePath;
+    if (!item || !targetPath || !fs.existsSync(targetPath) || item.expiresAt < Date.now()) {
       res.status(404).json({ error: 'Temporary video expired or not found.' });
       return;
     }
@@ -212,7 +238,7 @@ export function createApiRouter(): express.Router {
     try {
       const ticketParam = typeof req.query.ticket === 'string' ? req.query.ticket : undefined;
       if (ticketParam) {
-        const ticket = verifyStreamTicket(ticketParam, 'upload', req.params.uploadId);
+        const ticket = verifyStreamTicket(ticketParam, kind, req.params.uploadId);
         if (
           ticket &&
           ticket.tenantId === item.tenantId &&
@@ -239,8 +265,9 @@ export function createApiRouter(): express.Router {
       return;
     }
 
-    const stat = fs.statSync(item.filePath);
+    const stat = fs.statSync(targetPath);
     const total = stat.size;
+    const contentType = kind === 'upload-annotated' ? 'video/mp4' : item.mimeType || 'video/mp4';
     const range = req.headers.range;
     if (range) {
       const parts = range.replace(/bytes=/, '').split('-');
@@ -251,16 +278,26 @@ export function createApiRouter(): express.Router {
         'Content-Range': `bytes ${start}-${end}/${total}`,
         'Accept-Ranges': 'bytes',
         'Content-Length': chunkSize,
-        'Content-Type': item.mimeType || 'video/mp4',
+        'Content-Type': contentType,
       });
-      fs.createReadStream(item.filePath, { start, end }).pipe(res);
+      fs.createReadStream(targetPath, { start, end }).pipe(res);
       return;
     }
     res.writeHead(200, {
       'Content-Length': total,
-      'Content-Type': item.mimeType || 'video/mp4',
+      'Content-Type': contentType,
     });
-    fs.createReadStream(item.filePath).pipe(res);
+    fs.createReadStream(targetPath).pipe(res);
+  }
+
+  // Protected stream for temporary uploaded test video (requires Bearer/dev session OR scoped HMAC ticket)
+  router.get('/vision/stream/:uploadId', async (req, res: Response) => {
+    await authorizeAndStreamUpload(req, res, 'upload');
+  });
+
+  // Protected stream for Python-generated annotated MP4 output
+  router.get('/vision/annotated/:uploadId', async (req, res: Response) => {
+    await authorizeAndStreamUpload(req, res, 'upload-annotated');
   });
 
   // Protected MJPEG camera proxy stream (requires Bearer/dev auth OR scoped HMAC stream ticket; never exposes RTSP URLs to browser)
@@ -350,6 +387,9 @@ export function createApiRouter(): express.Router {
       const upstream = await fetch(`${visionUrl}/streams/${encodeURIComponent(camera.cameraId)}/mjpeg`, {
         headers: {
           'x-edge-api-key': edgeKey,
+          'x-tenant-id': camera.tenantId,
+          'x-outlet-id': camera.outletId,
+          'x-zones-json': JSON.stringify(camera.zones || []),
           ...(rtspSourceHeader ? { 'x-rtsp-source': rtspSourceHeader } : {}),
         },
       });
@@ -357,6 +397,7 @@ export function createApiRouter(): express.Router {
         res.status(upstream.status || 502).json({ error: 'Upstream vision MJPEG stream unavailable.' });
         return;
       }
+      markVerifiedYoloInference();
       res.writeHead(200, {
         'Content-Type': upstream.headers.get('content-type') || 'multipart/x-mixed-replace; boundary=frame',
         'Cache-Control': 'no-store',
@@ -390,9 +431,37 @@ export function createApiRouter(): express.Router {
       dwellSeconds?: number;
       sessionStatus?: VisitSession['sessionStatus'];
     };
-    if (!body.tenantId || !body.outletId || !body.cameraId || !body.temporaryTrackId) {
+    if (!body.tenantId || !body.outletId || !body.cameraId || !body.temporaryTrackId?.trim()) {
       res.status(400).json({ error: 'Missing required detection event fields.' });
       return;
+    }
+
+    const confidence = Number(body.confidence ?? 0.85);
+    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+      res.status(400).json({ error: 'Invalid confidence score; must be between 0 and 1.' });
+      return;
+    }
+
+    const validEventTypes: DetectionEvent['eventType'][] = [
+      'entry',
+      'exit',
+      'zone_dwell',
+      'billing_zone_enter',
+    ];
+    const eventType: DetectionEvent['eventType'] =
+      body.eventType && validEventTypes.includes(body.eventType) ? body.eventType : 'zone_dwell';
+
+    let validBbox: [number, number, number, number] | undefined;
+    if (body.bbox !== undefined) {
+      if (
+        !Array.isArray(body.bbox) ||
+        body.bbox.length !== 4 ||
+        body.bbox.some((n) => typeof n !== 'number' || !Number.isFinite(n))
+      ) {
+        res.status(400).json({ error: 'Invalid bbox coordinates; expected [x1, y1, x2, y2].' });
+        return;
+      }
+      validBbox = [body.bbox[0], body.bbox[1], body.bbox[2], body.bbox[3]];
     }
 
     const state = dbStore.getState();
@@ -409,8 +478,12 @@ export function createApiRouter(): express.Router {
       return;
     }
 
-    const nowIso = new Date().toISOString();
-    const sessionId = body.sessionId || `S-${body.temporaryTrackId}`;
+    const nowIso =
+      body.timestamp && !Number.isNaN(Date.parse(body.timestamp))
+        ? new Date(body.timestamp).toISOString()
+        : new Date().toISOString();
+    const sessionId =
+      body.sessionId || `S-${body.cameraId}-${body.temporaryTrackId.trim()}`;
 
     let session = state.visitSessions.find((s) => s.sessionId === sessionId);
     if (!session) {
@@ -419,7 +492,7 @@ export function createApiRouter(): express.Router {
         tenantId: body.tenantId,
         outletId: body.outletId,
         cameraId: body.cameraId,
-        temporaryTrackId: body.temporaryTrackId,
+        temporaryTrackId: body.temporaryTrackId.trim(),
         firstSeen: nowIso,
         lastSeen: nowIso,
         dwellSeconds: body.dwellSeconds || 1,
@@ -439,17 +512,33 @@ export function createApiRouter(): express.Router {
       session.updatedAt = nowIso;
     }
 
+    if (camCheck.camera) {
+      camCheck.camera.connectionStatus = 'online';
+      camCheck.camera.lastSeen = nowIso;
+      camCheck.camera.lastHealthCheckMessage = `Edge YOLOv8n frame processed (${
+        typeof body.latencyMs === 'number' ? `${body.latencyMs}ms` : 'active'
+      })`;
+      camCheck.camera.updatedAt = nowIso;
+    }
+    if (typeof body.latencyMs === 'number' && Number.isFinite(body.latencyMs)) {
+      state.modelConfig.lastInferenceMs = Math.round(body.latencyMs);
+      state.modelConfig.inferenceStatus = 'live_edge';
+    }
+    markVerifiedYoloInference(nowIso);
+
     const event: DetectionEvent = {
       eventId: `evt-${crypto.randomUUID().slice(0, 8)}`,
       tenantId: body.tenantId,
       outletId: body.outletId,
       cameraId: body.cameraId,
       sessionId,
-      temporaryTrackId: body.temporaryTrackId,
-      eventType: body.eventType || 'zone_dwell',
-      confidence: Number(body.confidence ?? 0.85),
+      temporaryTrackId: body.temporaryTrackId.trim(),
+      eventType,
+      confidence,
       frameNumber: Number(body.frameNumber ?? 0),
       zoneName: body.zoneName || 'Floor',
+      bbox: validBbox,
+      latencyMs: typeof body.latencyMs === 'number' ? body.latencyMs : undefined,
       timestamp: nowIso,
       isDemoData: false,
     };
@@ -1338,6 +1427,11 @@ export function createApiRouter(): express.Router {
         return;
       }
       const outletId = String(req.body?.outletId || actor.assignedOutletIds[0] || '');
+      const requestedCameraId =
+        typeof req.body?.cameraId === 'string' && req.body.cameraId.trim()
+          ? req.body.cameraId.trim()
+          : 'upload-test';
+
       const state = dbStore.getState();
       const outlet = state.outlets.find((o) => o.outletId === outletId);
       if (!outlet) {
@@ -1351,28 +1445,54 @@ export function createApiRouter(): express.Router {
         return;
       }
 
+      const camCheck = validateCameraTenantOutlet({
+        cameras: state.cameras,
+        outlets: state.outlets,
+        cameraId: requestedCameraId,
+        tenantId: outlet.tenantId,
+        outletId: outlet.outletId,
+        allowUploadPlaceholder: true,
+      });
+      if (!camCheck.ok) {
+        fs.unlinkSync(file.path);
+        res.status(403).json({ error: camCheck.error });
+        return;
+      }
+
       const uploadId = `vid-${crypto.randomUUID().slice(0, 10)}`;
-      const ttlMs = 30 * 60_000;
+      const ttlMs = Number(process.env.UPLOAD_RETENTION_MS || 30 * 60_000);
       const expiresAt = Date.now() + ttlMs;
-      uploadedVideos.set(uploadId, {
+      const uploadRecord: {
+        filePath: string;
+        annotatedFilePath?: string;
+        mimeType: string;
+        filename: string;
+        expiresAt: number;
+        tenantId: string;
+        outletId: string;
+      } = {
         filePath: file.path,
         mimeType: file.mimetype || 'video/mp4',
         filename: file.originalname,
         expiresAt,
         tenantId: outlet.tenantId,
         outletId: outlet.outletId,
-      });
+      };
+      uploadedVideos.set(uploadId, uploadRecord);
 
-      // Auto-purge temporary upload file after 30 minutes
+      // Auto-purge temporary upload & annotated MP4 files after retention period
       setTimeout(() => {
         const entry = uploadedVideos.get(uploadId);
-        if (entry && fs.existsSync(entry.filePath)) {
+        if (entry?.filePath && fs.existsSync(entry.filePath)) {
           fs.unlink(entry.filePath, () => {});
+        }
+        if (entry?.annotatedFilePath && fs.existsSync(entry.annotatedFilePath)) {
+          fs.unlink(entry.annotatedFilePath, () => {});
         }
         uploadedVideos.delete(uploadId);
       }, ttlMs).unref();
 
-      const ticket = createStreamTicket(
+      const rawTicket = createStreamTicket(
         {
           kind: 'upload',
           resourceId: uploadId,
@@ -1382,35 +1502,239 @@ export function createApiRouter(): express.Router {
         },
         ttlMs
       );
+      const streamUrl = `/api/vision/stream/${uploadId}?ticket=${encodeURIComponent(rawTicket)}`;
 
-      const visionStatus = await probeVisionService();
-      dbStore.appendAudit({
-        userId: actor.userId,
-        userEmail: actor.email,
-        tenantId: outlet.tenantId,
-        action: 'TEST_VIDEO_UPLOADED',
-        resource: `vision/uploads/${uploadId}`,
-        details: `Uploaded temporary test file ${file.originalname} (${Math.round(file.size / 1024)} KB)`,
-      });
+      const visionUrl = getVisionServiceUrl();
+      const edgeKey = getEdgeApiKey();
 
-      res.status(201).json({
-        uploadId,
-        tenantId: outlet.tenantId,
-        outletId: outlet.outletId,
-        filename: file.originalname,
-        mimeType: file.mimetype || 'video/mp4',
-        sizeBytes: file.size,
-        streamUrl: `/api/vision/stream/${uploadId}?ticket=${encodeURIComponent(ticket)}`,
-        uploadedAt: new Date().toISOString(),
-        expiresAt: new Date(expiresAt).toISOString(),
-        visionServiceConfigured: visionStatus.configured,
-        visionServiceConnected: visionStatus.connected,
-        inferenceMode: visionStatus.connected ? 'python_yolov8_edge' : 'browser_demo_overlay',
-      });
+      if (!visionUrl) {
+        dbStore.appendAudit({
+          userId: actor.userId,
+          userEmail: actor.email,
+          tenantId: outlet.tenantId,
+          action: 'TEST_VIDEO_UPLOADED',
+          resource: `vision/uploads/${uploadId}`,
+          details: `Uploaded temporary test file ${file.originalname} (Demo Overlay — VISION_SERVICE_URL not configured)`,
+        });
+        res.status(201).json({
+          uploadId,
+          tenantId: outlet.tenantId,
+          outletId: outlet.outletId,
+          cameraId: requestedCameraId,
+          filename: file.originalname,
+          mimeType: file.mimetype || 'video/mp4',
+          sizeBytes: file.size,
+          streamUrl,
+          uploadedAt: new Date().toISOString(),
+          expiresAt: new Date(expiresAt).toISOString(),
+          visionServiceConfigured: false,
+          visionServiceConnected: false,
+          inferenceState: 'demo_overlay',
+          inferenceMode: 'browser_demo_overlay',
+        });
+        return;
+      }
+
+      if (!edgeKey) {
+        res.status(201).json({
+          uploadId,
+          tenantId: outlet.tenantId,
+          outletId: outlet.outletId,
+          cameraId: requestedCameraId,
+          filename: file.originalname,
+          mimeType: file.mimetype || 'video/mp4',
+          sizeBytes: file.size,
+          streamUrl,
+          uploadedAt: new Date().toISOString(),
+          expiresAt: new Date(expiresAt).toISOString(),
+          visionServiceConfigured: true,
+          visionServiceConnected: false,
+          inferenceState: 'error',
+          inferenceMode: 'error',
+          errorMessage: 'EDGE_API_KEY is not configured on backend; cannot authenticate request to Python vision-service.',
+        });
+        return;
+      }
+
+      try {
+        const buffer = await fs.promises.readFile(file.path);
+        const form = new FormData();
+        form.append(
+          'file',
+          new Blob([buffer], { type: file.mimetype || 'video/mp4' }),
+          file.originalname
+        );
+        form.append('tenant_id', outlet.tenantId);
+        form.append('outlet_id', outlet.outletId);
+        form.append('camera_id', requestedCameraId);
+        form.append('confidence_threshold', String(state.modelConfig.confidenceThreshold));
+        if (camCheck.camera?.zones) {
+          form.append('zones_json', JSON.stringify(camCheck.camera.zones));
+        }
+
+        const pyResp = await fetch(`${visionUrl}/upload-video`, {
+          method: 'POST',
+          headers: { 'x-edge-api-key': edgeKey },
+          body: form,
+        });
+
+        if (!pyResp.ok) {
+          const errBody = await pyResp.text().catch(() => '');
+          res.status(201).json({
+            uploadId,
+            tenantId: outlet.tenantId,
+            outletId: outlet.outletId,
+            cameraId: requestedCameraId,
+            filename: file.originalname,
+            mimeType: file.mimetype || 'video/mp4',
+            sizeBytes: file.size,
+            streamUrl,
+            uploadedAt: new Date().toISOString(),
+            expiresAt: new Date(expiresAt).toISOString(),
+            visionServiceConfigured: true,
+            visionServiceConnected: false,
+            inferenceState: 'error',
+            inferenceMode: 'error',
+            errorMessage: `Python vision-service inference failed (HTTP ${pyResp.status}): ${errBody || pyResp.statusText}`,
+          });
+          return;
+        }
+
+        const pyData = (await pyResp.json()) as {
+          upload_job_id: string;
+          annotated_download_path?: string;
+          model?: string;
+          confidence_threshold?: number;
+          device?: string;
+          frames_total?: number;
+          frames_processed?: number;
+          unique_temporary_tracks?: string[];
+          visitor_count?: number;
+          total_detections?: number;
+          avg_fps?: number;
+          inference_ms?: number;
+          events_dispatched?: number;
+          detections_sample?: Array<{
+            temporaryTrackId: string;
+            bbox: [number, number, number, number];
+            confidence: number;
+            frameNumber: number;
+            timestamp: string;
+            cameraId: string;
+            outletId: string;
+            tenantId: string;
+            zoneName?: string;
+            latencyMs?: number;
+          }>;
+        };
+
+        let annotatedStreamUrl: string | undefined;
+        if (pyData.annotated_download_path) {
+          const annotatedResp = await fetch(`${visionUrl}${pyData.annotated_download_path}`, {
+            headers: { 'x-edge-api-key': edgeKey },
+          });
+          if (annotatedResp.ok) {
+            const annotatedBuf = Buffer.from(await annotatedResp.arrayBuffer());
+            const annotatedPath = path.join(UPLOAD_DIR, `${uploadId}-annotated.mp4`);
+            await fs.promises.writeFile(annotatedPath, annotatedBuf);
+            uploadRecord.annotatedFilePath = annotatedPath;
+
+            const annotatedTicket = createStreamTicket(
+              {
+                kind: 'upload-annotated',
+                resourceId: uploadId,
+                userId: actor.userId,
+                tenantId: outlet.tenantId,
+                outletId: outlet.outletId,
+              },
+              ttlMs
+            );
+            annotatedStreamUrl = `/api/vision/annotated/${uploadId}?ticket=${encodeURIComponent(annotatedTicket)}`;
+
+            // Clean up duplicate temporary artifact on Python side once buffered locally
+            void fetch(`${visionUrl}${pyData.annotated_download_path}`, {
+              method: 'DELETE',
+              headers: { 'x-edge-api-key': edgeKey },
+            }).catch(() => {});
+          }
+        }
+
+        const nowIso = new Date().toISOString();
+        const uniqueTracks = pyData.unique_temporary_tracks || [];
+        state.modelConfig.lastInferenceMs = Math.round(pyData.inference_ms || 0);
+        state.modelConfig.measuredFps = pyData.avg_fps || 0;
+        state.modelConfig.activeTrackCount = uniqueTracks.length;
+        state.modelConfig.inferenceStatus = 'live_edge';
+        state.modelConfig.deviceType = pyData.device === 'CUDA_GPU' ? 'CUDA_GPU' : 'CPU';
+        markVerifiedYoloInference(nowIso);
+
+        dbStore.appendAudit({
+          userId: actor.userId,
+          userEmail: actor.email,
+          tenantId: outlet.tenantId,
+          action: 'YOLO_VIDEO_INFERENCE_COMPLETED',
+          resource: `vision/uploads/${uploadId}`,
+          details: `Processed ${file.originalname} via ${pyData.model || state.modelConfig.modelName}: ${uniqueTracks.length} unique tracks, ${pyData.total_detections || 0} detections`,
+        });
+        dbStore.save();
+
+        res.status(201).json({
+          uploadId,
+          tenantId: outlet.tenantId,
+          outletId: outlet.outletId,
+          cameraId: requestedCameraId,
+          filename: file.originalname,
+          mimeType: file.mimetype || 'video/mp4',
+          sizeBytes: file.size,
+          streamUrl,
+          annotatedStreamUrl,
+          uploadedAt: nowIso,
+          expiresAt: new Date(expiresAt).toISOString(),
+          visionServiceConfigured: true,
+          visionServiceConnected: true,
+          inferenceState: 'live_yolo',
+          inferenceMode: 'live_yolo',
+          metrics: {
+            model: pyData.model || state.modelConfig.modelName,
+            confidenceThreshold: pyData.confidence_threshold ?? state.modelConfig.confidenceThreshold,
+            device: pyData.device || 'CPU',
+            framesTotal: pyData.frames_total || 0,
+            framesProcessed: pyData.frames_processed || 0,
+            uniqueTrackIds: uniqueTracks,
+            totalDetections: pyData.total_detections || 0,
+            visitorCount: pyData.visitor_count ?? uniqueTracks.length,
+            avgFps: pyData.avg_fps || 0,
+            inferenceMs: pyData.inference_ms || 0,
+            eventsDispatched: pyData.events_dispatched || 0,
+            detectionsSample: pyData.detections_sample || [],
+          },
+        });
+      } catch (err) {
+        res.status(201).json({
+          uploadId,
+          tenantId: outlet.tenantId,
+          outletId: outlet.outletId,
+          cameraId: requestedCameraId,
+          filename: file.originalname,
+          mimeType: file.mimetype || 'video/mp4',
+          sizeBytes: file.size,
+          streamUrl,
+          uploadedAt: new Date().toISOString(),
+          expiresAt: new Date(expiresAt).toISOString(),
+          visionServiceConfigured: true,
+          visionServiceConnected: false,
+          inferenceState: 'error',
+          inferenceMode: 'error',
+          errorMessage:
+            err instanceof Error
+              ? `Could not reach Python vision-service for inference: ${err.message}`
+              : 'Could not reach Python vision-service for inference.',
+        });
+      }
     }
   );
 
-  router.patch('/model/config', requireRole('DEVELOPER'), (req: AuthenticatedRequest, res) => {
+  router.patch('/model/config', requireRole('DEVELOPER'), async (req: AuthenticatedRequest, res) => {
     const actor = req.actor!;
     const state = dbStore.getState();
     const { confidenceThreshold, modelName } = req.body as {
@@ -1423,6 +1747,23 @@ export function createApiRouter(): express.Router {
     if (modelName && ['yolov8n.pt', 'yolov8s.pt'].includes(modelName)) {
       state.modelConfig.modelName = modelName;
     }
+
+    const visionUrl = getVisionServiceUrl();
+    const edgeKey = getEdgeApiKey();
+    if (visionUrl && edgeKey) {
+      void fetch(`${visionUrl}/model`, {
+        method: 'PATCH',
+        headers: {
+          'content-type': 'application/json',
+          'x-edge-api-key': edgeKey,
+        },
+        body: JSON.stringify({
+          confidence_threshold: state.modelConfig.confidenceThreshold,
+          model_name: state.modelConfig.modelName,
+        }),
+      }).catch(() => {});
+    }
+
     dbStore.appendAudit({
       userId: actor.userId,
       userEmail: actor.email,

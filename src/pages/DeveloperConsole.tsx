@@ -705,6 +705,7 @@ export const DeveloperConsole: React.FC<DeveloperConsoleProps> = ({
               outlets={outlets}
               modelConfig={modelConfig}
               visionServiceStatus={visionServiceStatus}
+              detectionEvents={detectionEvents}
               canEditZones={true}
               onCameraUpdated={() => {
                 void onRefresh();
@@ -721,13 +722,19 @@ export const DeveloperConsole: React.FC<DeveloperConsoleProps> = ({
                 <KpiCard
                   label="Python Vision Service"
                   value={
-                    visionServiceStatus.connected
-                      ? 'Connected (Live YOLO)'
-                      : visionServiceStatus.configured
-                        ? 'Configured · Offline'
-                        : 'Not Configured'
+                    visionServiceStatus.inferenceState === 'live_yolo'
+                      ? 'LIVE YOLO Verified'
+                      : visionServiceStatus.connected
+                        ? 'Standby · Ready'
+                        : visionServiceStatus.configured
+                          ? 'Configured · Offline'
+                          : 'Not Configured'
                   }
-                  tone={visionServiceStatus.connected ? 'success' : 'warning'}
+                  tone={
+                    visionServiceStatus.inferenceState === 'live_yolo'
+                      ? 'success'
+                      : 'warning'
+                  }
                   subtext={visionServiceStatus.endpoint}
                 />
                 <KpiCard
@@ -832,13 +839,15 @@ export const DeveloperConsole: React.FC<DeveloperConsoleProps> = ({
                     </p>
                   </div>
                   <StatusText
-                    tone={visionServiceStatus.connected ? 'success' : 'warning'}
+                    tone={visionServiceStatus.inferenceState === 'live_yolo' ? 'success' : 'warning'}
                     label={
-                      visionServiceStatus.connected
-                        ? 'Live YOLO Inference Connected'
-                        : visionServiceStatus.configured
-                          ? 'Configured Edge Offline (Demo Overlay)'
-                          : 'Demo Simulation Mode (Set VISION_SERVICE_URL)'
+                      visionServiceStatus.inferenceState === 'live_yolo'
+                        ? 'LIVE YOLO Verified'
+                        : visionServiceStatus.connected
+                          ? 'Edge Standby (Awaiting Video / Stream)'
+                          : visionServiceStatus.configured
+                            ? 'Configured Edge Offline (Demo Simulation)'
+                            : 'Demo Simulation Mode (Set VISION_SERVICE_URL)'
                     }
                   />
                 </div>
@@ -852,7 +861,11 @@ export const DeveloperConsole: React.FC<DeveloperConsoleProps> = ({
                   />
                   <KpiCard
                     label="Inference Latency"
-                    value={visionServiceStatus.connected ? `${modelConfig.lastInferenceMs} ms` : 'N/A'}
+                    value={
+                      visionServiceStatus.inferenceState === 'live_yolo' && modelConfig.lastInferenceMs > 0
+                        ? `${modelConfig.lastInferenceMs} ms`
+                        : 'Awaiting Run'
+                    }
                   />
                 </div>
 

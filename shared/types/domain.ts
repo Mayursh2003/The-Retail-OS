@@ -117,6 +117,26 @@ export interface VisitSession {
   updatedAt: string;
 }
 
+export type InferenceState =
+  | 'live_yolo'
+  | 'processing'
+  | 'demo_overlay'
+  | 'offline'
+  | 'error';
+
+export interface TrackedDetectionSample {
+  temporaryTrackId: string;
+  bbox: [number, number, number, number]; // normalized 0..1000 [x1, y1, x2, y2]
+  confidence: number;
+  frameNumber: number;
+  timestamp: string;
+  cameraId: string;
+  outletId: string;
+  tenantId: string;
+  zoneName?: string;
+  latencyMs?: number;
+}
+
 export interface DetectionEvent {
   eventId: string;
   tenantId: string;
@@ -128,6 +148,8 @@ export interface DetectionEvent {
   confidence: number;
   frameNumber: number;
   zoneName: string;
+  bbox?: [number, number, number, number];
+  latencyMs?: number;
   timestamp: string;
   isDemoData?: boolean;
 }
@@ -200,19 +222,39 @@ export interface ModelConfig {
   activeTrackCount: number;
 }
 
+export interface UploadedVideoInferenceMetrics {
+  model: string;
+  confidenceThreshold: number;
+  device: string;
+  framesTotal: number;
+  framesProcessed: number;
+  uniqueTrackIds: string[];
+  totalDetections: number;
+  visitorCount: number;
+  avgFps: number;
+  inferenceMs: number;
+  eventsDispatched: number;
+  detectionsSample: TrackedDetectionSample[];
+}
+
 export interface UploadedTestVideo {
   uploadId: string;
   tenantId: string;
   outletId: string;
+  cameraId: string;
   filename: string;
   mimeType: string;
   sizeBytes: number;
   streamUrl: string;
+  annotatedStreamUrl?: string;
   uploadedAt: string;
   expiresAt: string;
   visionServiceConfigured: boolean;
   visionServiceConnected: boolean;
-  inferenceMode: 'python_yolov8_edge' | 'browser_demo_overlay';
+  inferenceState: InferenceState;
+  inferenceMode: 'live_yolo' | 'python_yolov8_edge' | 'browser_demo_overlay' | 'error';
+  errorMessage?: string;
+  metrics?: UploadedVideoInferenceMetrics;
 }
 
 export interface InventoryItemPreview {
@@ -261,11 +303,13 @@ export interface WorkspaceSnapshot {
   visionServiceStatus: {
     configured: boolean;
     connected: boolean;
+    inferenceState: InferenceState;
     inferenceMode: 'live_yolo' | 'demo_simulation';
     endpoint: string;
     message: string;
     model?: string;
     device?: string;
+    lastVerifiedInferenceAt?: string;
   };
   securityStatus?: SecurityStatusSummary;
 }

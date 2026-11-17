@@ -1,6 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Camera as CameraIcon,
+  Loader2,
   Maximize2,
   Minimize2,
   Pause,
@@ -13,6 +15,8 @@ import {
 import type {
   Camera,
   CameraZone,
+  DetectionEvent,
+  InferenceState,
   ModelConfig,
   Outlet,
   UploadedTestVideo,
@@ -22,7 +26,7 @@ import type {
 import { apiClient, type AuthSessionHeaders } from '../services/apiClient';
 import { StatusText } from './StatusText';
 
-interface SimulatedBox {
+interface OverlayDetectionBox {
   trackId: string;
   x: number;
   y: number;
@@ -30,6 +34,7 @@ interface SimulatedBox {
   h: number;
   confidence: number;
   zoneName: string;
+  isDemoData: boolean;
 }
 
 interface LiveCameraPlayerProps {
@@ -38,9 +43,21 @@ interface LiveCameraPlayerProps {
   outlets: Outlet[];
   modelConfig: ModelConfig;
   visionServiceStatus: WorkspaceSnapshot['visionServiceStatus'];
+  detectionEvents?: DetectionEvent[];
   canEditZones: boolean;
   onCameraUpdated?: (camera: Camera) => void;
 }
+
+const STATE_DISPLAY: Record<
+  InferenceState,
+  { badge: string; tone: 'success' | 'warning' | 'danger' | 'neutral' }
+> = {
+  live_yolo: { badge: 'LIVE YOLO', tone: 'success' },
+  processing: { badge: 'VIDEO PROCESSING', tone: 'warning' },
+  demo_overlay: { badge: 'DEMO SIMULATION', tone: 'warning' },
+  offline: { badge: 'CAMERA OFFLINE', tone: 'danger' },
+  error: { badge: 'INFERENCE ERROR', tone: 'danger' },
+};
 
 export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
   session,
@@ -48,6 +65,7 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
   outlets,
   modelConfig,
   visionServiceStatus,
+  detectionEvents = [],
   canEditZones,
   onCameraUpdated,
 }) => {
@@ -104,56 +122,161 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [visionServiceStatus.connected, selectedCamera?.cameraId, selectedCamera?.connectionStatus, uploadedVideo, session]);
+  }, [
+    visionServiceStatus.connected,
+    selectedCamera?.cameraId,
+    selectedCamera?.connectionStatus,
+    uploadedVideo,
+    session,
+  ]);
 
-  // Deterministic demo bounding boxes shown ONLY when clearly labelled as Demo Overlay (or uploaded video preview without Python service)
+  // Recent real (non-demo) WebSocket detection events for the currently selected camera
+  const recentRealEvents = useMemo(() => {
+    if (!selectedCamera) return [];
+    const cutoff = Date.now() - 12_000;
+    const seenTrack = new Set<string>();
+    const list: DetectionEvent[] = [];
+    for (const evt of detectionEvents) {
+      if (evt.isDemoData !== false) continue;
+      if (evt.cameraId !== selectedCamera.cameraId) continue;
+      if (Date.parse(evt.timestamp) < cutoff) continue;
+      if (seenTrack.has(evt.temporaryTrackId)) continue;
+      seenTrack.add(evt.temporaryTrackId);
+      list.push(evt);
+    }
+    return list;
+  }, [detectionEvents, selectedCamera]);
+
+  const liveMjpegActive = Boolean(
+    !uploadedVideo &&
+      selectedCamera?.connectionStatus !== 'offline' &&
+      visionServiceStatus.connected &&
+      liveMjpegUrl &&
+      !liveMjpegFailed
+  );
+
+  // Determine exact inference state (never fake LIVE YOLO from /health alone)
+  const uiState: InferenceState = useMemo(() => {
+    if (uploading) return 'processing';
+    if (uploadError || uploadedVideo?.inferenceState === 'error') return 'error';
+    if (uploadedVideo) {
+      return uploadedVideo.inferenceState === 'live_yolo' ? 'live_yolo' : 'demo_overlay';
+    }
+    if (selectedCamera?.connectionStatus === 'offline') return 'offline';
+    if (liveMjpegActive || recentRealEvents.length > 0) return 'live_yolo';
+    return 'demo_overlay';
+  }, [
+    uploading,
+    uploadError,
+    uploadedVideo,
+    selectedCamera?.connectionStatus,
+    liveMjpegActive,
+    recentRealEvents.length,
+  ]);
+
+  // Demo animation tick runs ONLY when strictly in DEMO SIMULATION mode
   const [tick, setTick] = useState(0);
   useEffect(() => {
-    if (playbackState !== 'running') return;
+    if (uiState !== 'demo_overlay' || playbackState !== 'running') return;
     const timer = setInterval(() => {
       setTick((t) => (t + 1) % 120);
     }, 500);
     return () => clearInterval(timer);
-  }, [playbackState]);
+  }, [uiState, playbackState]);
 
-  const demoDetections: SimulatedBox[] =
-    playbackState === 'stopped' || showRawFeed
-      ? []
-      : [
-          {
-            trackId: 'TRK-004',
-            x: 590 + Math.round(Math.sin(tick * 0.12) * 35),
-            y: 340,
-            w: 110,
-            h: 290,
-            confidence: 0.91,
-            zoneName: 'Billing Counter',
-          },
-          {
-            trackId: 'TRK-005',
-            x: 190 + Math.round(Math.cos(tick * 0.1) * 45),
-            y: 310,
-            w: 105,
-            h: 275,
-            confidence: 0.87,
-            zoneName: 'Entrance',
-          },
-        ].filter((b) => b.confidence >= modelConfig.confidenceThreshold);
+  const activeDetections: OverlayDetectionBox[] = useMemo(() => {
+    if (playbackState === 'stopped' || showRawFeed) return [];
+
+    // When real Python annotated video plays, boxes are baked into annotated MP4 (do not overlay fake boxes)
+    if (uploadedVideo?.inferenceState === 'live_yolo') {
+      return [];
+    }
+
+    // Real WebSocket detection boxes when live inference is active
+    if (uiState === 'live_yolo') {
+      return recentRealEvents
+        .filter((e) => Array.isArray(e.bbox) && e.bbox.length === 4)
+        .map((e) => {
+          const [x1, y1, x2, y2] = e.bbox!;
+          return {
+            trackId: e.temporaryTrackId,
+            x: x1,
+            y: y1,
+            w: Math.max(20, x2 - x1),
+            h: Math.max(40, y2 - y1),
+            confidence: e.confidence,
+            zoneName: e.zoneName,
+            isDemoData: false,
+          };
+        });
+    }
+
+    // Synthetic demo boxes ONLY in explicit DEMO SIMULATION mode
+    if (uiState === 'demo_overlay') {
+      return [
+        {
+          trackId: 'DEMO-TRK-004',
+          x: 590 + Math.round(Math.sin(tick * 0.12) * 35),
+          y: 340,
+          w: 110,
+          h: 290,
+          confidence: 0.91,
+          zoneName: 'Billing Counter',
+          isDemoData: true,
+        },
+        {
+          trackId: 'DEMO-TRK-005',
+          x: 190 + Math.round(Math.cos(tick * 0.1) * 45),
+          y: 310,
+          w: 105,
+          h: 275,
+          confidence: 0.87,
+          zoneName: 'Entrance',
+          isDemoData: true,
+        },
+      ].filter((b) => b.confidence >= modelConfig.confidenceThreshold);
+    }
+
+    return [];
+  }, [
+    playbackState,
+    showRawFeed,
+    uploadedVideo,
+    uiState,
+    recentRealEvents,
+    tick,
+    modelConfig.confidenceThreshold,
+  ]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setUploadError(null);
     setUploading(true);
+    setUploadedVideo(null);
     try {
       const targetOutletId = selectedCamera?.outletId || outlets[0]?.outletId || '';
-      const result = await apiClient.uploadTestVideo(session, file, targetOutletId);
+      const targetCameraId =
+        selectedCamera && selectedCamera.outletId === targetOutletId
+          ? selectedCamera.cameraId
+          : 'upload-test';
+      const result = await apiClient.uploadTestVideo(
+        session,
+        file,
+        targetOutletId,
+        targetCameraId
+      );
       setUploadedVideo(result);
+      setShowRawFeed(false);
       setPlaybackState('running');
+      if (result.inferenceState === 'error' && result.errorMessage) {
+        setUploadError(result.errorMessage);
+      }
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Video upload failed.');
     } finally {
       setUploading(false);
+      e.target.value = '';
     }
   };
 
@@ -214,6 +337,46 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
     }
   };
 
+  const uploadMetrics = uploadedVideo?.metrics;
+  const activeTrackIdsDisplay = uploadMetrics
+    ? uploadMetrics.uniqueTrackIds.join(', ') || 'None'
+    : uiState === 'live_yolo'
+      ? recentRealEvents.map((e) => e.temporaryTrackId).join(', ') || 'Streaming MJPEG'
+      : uiState === 'demo_overlay'
+        ? activeDetections.map((d) => d.trackId).join(', ') || 'None'
+        : 'None';
+
+  const visitorCountDisplay = uploadMetrics
+    ? uploadMetrics.visitorCount
+    : uiState === 'live_yolo'
+      ? recentRealEvents.length
+      : uiState === 'demo_overlay'
+        ? activeDetections.length
+        : 0;
+
+  const fpsDisplay = uploadMetrics
+    ? `${uploadMetrics.avgFps} FPS`
+    : uiState === 'live_yolo'
+      ? `${modelConfig.measuredFps || selectedCamera?.fps || 0} FPS`
+      : uiState === 'demo_overlay' && playbackState === 'running'
+        ? `${selectedCamera?.fps || 15} FPS (DEMO)`
+        : '0 FPS';
+
+  const latencyDisplay = uploadMetrics
+    ? `${uploadMetrics.inferenceMs} ms`
+    : uiState === 'live_yolo'
+      ? `${recentRealEvents[0]?.latencyMs ?? modelConfig.lastInferenceMs ?? 0} ms`
+      : uiState === 'demo_overlay'
+        ? 'Demo Overlay'
+        : uiState === 'processing'
+          ? 'Processing...'
+          : 'N/A';
+
+  const activeVideoSrc =
+    uploadedVideo && (showRawFeed ? uploadedVideo.streamUrl : uploadedVideo.annotatedStreamUrl || uploadedVideo.streamUrl);
+
+  const stateMeta = STATE_DISPLAY[uiState];
+
   return (
     <div className="space-y-4">
       {/* Control Toolbar */}
@@ -261,12 +424,17 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
 
         <div className="flex flex-wrap items-center gap-2">
           <label className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 border border-slate-200 rounded-lg hover:bg-slate-200 cursor-pointer whitespace-nowrap">
-            <Upload className="w-3.5 h-3.5" />
-            <span>{uploading ? 'Uploading...' : 'Upload Test Video (MP4/AVI/MOV)'}</span>
+            {uploading ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Upload className="w-3.5 h-3.5" />
+            )}
+            <span>{uploading ? 'Running YOLOv8n...' : 'Upload Test Video (MP4/AVI/MOV)'}</span>
             <input
               type="file"
               accept=".mp4,.avi,.mov,.webm,video/*"
               onChange={handleFileUpload}
+              disabled={uploading}
               className="hidden"
             />
           </label>
@@ -274,7 +442,10 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
           {uploadedVideo && (
             <button
               type="button"
-              onClick={() => setUploadedVideo(null)}
+              onClick={() => {
+                setUploadedVideo(null);
+                setUploadError(null);
+              }}
               className="px-3 py-1.5 text-xs font-medium text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-100 whitespace-nowrap"
             >
               Clear Test Video
@@ -284,93 +455,115 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
       </div>
 
       {uploadError && (
-        <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-2.5 text-xs text-red-700">
-          {uploadError}
+        <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-2.5 text-xs text-red-700 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>{uploadError}</span>
         </div>
       )}
 
       {/* Honest Inference Source Banner */}
       <div className="bg-white border border-slate-200 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
         <div className="flex items-center gap-2">
-          {visionServiceStatus.connected && visionServiceStatus.inferenceMode === 'live_yolo' ? (
-            <StatusText
-              tone="success"
-              label={`Live YOLOv8n + ByteTrack Connected (${visionServiceStatus.device || 'Edge'})`}
-            />
-          ) : (
-            <StatusText
-              tone="warning"
-              label={
-                uploadedVideo
-                  ? 'Uploaded Video Playback · Demo Overlay (Not Real YOLO Inference)'
-                  : visionServiceStatus.configured
-                    ? 'VISION_SERVICE_URL Unreachable · Demo Simulation Only'
-                    : 'VISION_SERVICE_URL Not Configured · Demo Simulation Only'
-              }
-            />
-          )}
+          <StatusText
+            tone={stateMeta.tone}
+            label={
+              uiState === 'live_yolo' && uploadMetrics
+                ? `LIVE YOLO · Annotated MP4 & Metrics (${uploadMetrics.device})`
+                : uiState === 'live_yolo'
+                  ? `LIVE YOLO · Active Stream (${visionServiceStatus.device || 'Edge'})`
+                  : uiState === 'processing'
+                    ? 'VIDEO PROCESSING · Running YOLOv8n + ByteTrack'
+                    : uiState === 'error'
+                      ? 'INFERENCE ERROR · Python Vision Inference Failed'
+                      : uiState === 'offline'
+                        ? 'CAMERA OFFLINE · Stream Disconnected'
+                        : uploadedVideo
+                          ? 'DEMO SIMULATION · Uploaded Video Preview Only (Set VISION_SERVICE_URL for YOLO)'
+                          : visionServiceStatus.connected
+                            ? 'DEMO SIMULATION · Edge Standby (Upload Video or Open Live Stream)'
+                            : visionServiceStatus.configured
+                              ? 'DEMO SIMULATION · VISION_SERVICE_URL Unreachable'
+                              : 'DEMO SIMULATION · VISION_SERVICE_URL Not Configured'
+            }
+          />
         </div>
         <div className="flex items-center gap-4 text-slate-500 font-mono tabular-nums">
-          <span>Mode: {visionServiceStatus.connected ? 'Live YOLO' : 'Demo Simulation'}</span>
-          <span>Model: {visionServiceStatus.model || modelConfig.modelName}</span>
-          <span>Conf &ge; {modelConfig.confidenceThreshold}</span>
+          <span>State: {stateMeta.badge}</span>
+          <span>Model: {uploadMetrics?.model || visionServiceStatus.model || modelConfig.modelName}</span>
+          <span>Conf &ge; {uploadMetrics?.confidenceThreshold ?? modelConfig.confidenceThreshold}</span>
           <span>Tracker: ByteTrack</span>
         </div>
       </div>
 
       {viewMode === 'grid' ? (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {cameras.map((cam) => (
-            <div key={cam.cameraId} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-              <div className="px-4 py-2.5 border-b border-slate-200 flex items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold text-slate-900 truncate">{cam.cameraName}</p>
-                  <p className="text-xs text-slate-500 truncate">
-                    {outletMap.get(cam.outletId)} · {cam.sourceType} · {cam.resolution}
-                  </p>
+          {cameras.map((cam) => {
+            const camRealEvents = detectionEvents.filter(
+              (e) => e.isDemoData === false && e.cameraId === cam.cameraId
+            );
+            const hasRealEdge = visionServiceStatus.connected && cam.connectionStatus === 'online';
+            return (
+              <div key={cam.cameraId} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                <div className="px-4 py-2.5 border-b border-slate-200 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-slate-900 truncate">{cam.cameraName}</p>
+                    <p className="text-xs text-slate-500 truncate">
+                      {outletMap.get(cam.outletId)} · {cam.sourceType} · {cam.resolution}
+                    </p>
+                  </div>
+                  <StatusText
+                    tone={
+                      cam.connectionStatus === 'offline'
+                        ? 'danger'
+                        : hasRealEdge && camRealEvents.length > 0
+                          ? 'success'
+                          : 'warning'
+                    }
+                    label={
+                      cam.connectionStatus === 'offline'
+                        ? 'CAMERA OFFLINE'
+                        : hasRealEdge
+                          ? 'EDGE CONNECTED'
+                          : 'DEMO SIMULATION'
+                    }
+                  />
                 </div>
-                <StatusText
-                  tone={
-                    cam.connectionStatus === 'online'
-                      ? 'success'
-                      : cam.connectionStatus === 'degraded'
-                        ? 'warning'
-                        : 'danger'
-                  }
-                  label={cam.connectionStatus.toUpperCase()}
-                />
-              </div>
-              <div className="relative aspect-video bg-slate-950 flex items-center justify-center">
-                {cam.connectionStatus === 'offline' ? (
-                  <div className="text-center px-4">
-                    <WifiOff className="w-7 h-7 text-red-400 mx-auto mb-2" />
-                    <p className="text-xs font-medium text-red-300">Camera Stream Offline</p>
-                    <p className="text-xs text-slate-400 mt-1">{cam.lastHealthCheckMessage}</p>
-                  </div>
-                ) : (
-                  <div className="w-full h-full relative p-3 flex flex-col justify-between">
-                    <div className="flex items-center justify-between text-xs font-mono text-slate-300">
-                      <span>DEMO PREVIEW · {cam.cameraId}</span>
-                      <span>{cam.fps} FPS</span>
+                <div className="relative aspect-video bg-slate-950 flex items-center justify-center">
+                  {cam.connectionStatus === 'offline' ? (
+                    <div className="text-center px-4">
+                      <WifiOff className="w-7 h-7 text-red-400 mx-auto mb-2" />
+                      <p className="text-xs font-medium text-red-300">Camera Stream Offline</p>
+                      <p className="text-xs text-slate-400 mt-1">{cam.lastHealthCheckMessage}</p>
                     </div>
-                    <div className="text-center text-xs text-slate-400">
-                      Zones configured: {cam.zones.length} · Anonymous ByteTrack Active
+                  ) : (
+                    <div className="w-full h-full relative p-3 flex flex-col justify-between">
+                      <div className="flex items-center justify-between text-xs font-mono text-slate-300">
+                        <span>
+                          {hasRealEdge ? `EDGE READY · ${cam.cameraId}` : `SIMULATED PREVIEW (DEMO DATA) · ${cam.cameraId}`}
+                        </span>
+                        <span>{hasRealEdge ? `${cam.fps} FPS` : 'DEMO'}</span>
+                      </div>
+                      <div className="text-center text-xs text-slate-400">
+                        {hasRealEdge
+                          ? `Zones: ${cam.zones.length} · Recent real events: ${camRealEvents.length}`
+                          : `Zones configured: ${cam.zones.length} · No live edge stream connected`}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedCameraId(cam.cameraId);
+                          setViewMode('single');
+                        }}
+                        className="self-end px-2.5 py-1 text-xs font-medium text-white bg-blue-600 rounded hover:bg-blue-700"
+                      >
+                        Inspect Camera
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedCameraId(cam.cameraId);
-                        setViewMode('single');
-                      }}
-                      className="self-end px-2.5 py-1 text-xs font-medium text-white bg-blue-600 rounded hover:bg-blue-700"
-                    >
-                      Inspect Camera
-                    </button>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         <div
@@ -389,7 +582,11 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
                 </h2>
                 <p className="text-xs text-slate-500 font-mono">
                   {uploadedVideo
-                    ? `Temporary Buffer (${Math.round(uploadedVideo.sizeBytes / 1024)} KB) · Auto-purges in 30m`
+                    ? `${
+                        uploadedVideo.annotatedStreamUrl
+                          ? 'YOLOv8n + ByteTrack Annotated MP4'
+                          : 'Temporary Raw Video Buffer'
+                      } (${Math.round(uploadedVideo.sizeBytes / 1024)} KB) · Auto-purges after retention`
                     : `${selectedCamera?.maskedEndpoint || ''} · ${selectedCamera?.resolution || '1920x1080'}`}
                 </p>
               </div>
@@ -401,7 +598,7 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
                 onClick={() => setShowRawFeed((v) => !v)}
                 className="px-2.5 py-1.5 text-xs font-medium border border-slate-200 rounded-lg text-slate-700 hover:bg-slate-50 whitespace-nowrap"
               >
-                {showRawFeed ? 'Show Annotated Overlay' : 'Show Raw View'}
+                {showRawFeed ? 'Show Annotated Output' : 'Show Raw View'}
               </button>
               <button
                 type="button"
@@ -452,10 +649,19 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
 
           {/* Main Video / Canvas Surface */}
           <div className="relative aspect-video bg-slate-950 w-full overflow-hidden">
-            {uploadedVideo ? (
+            {uploading ? (
+              <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center">
+                <Loader2 className="w-9 h-9 text-blue-400 animate-spin mb-3" />
+                <p className="text-sm font-semibold text-white">Processing Video via YOLOv8n + ByteTrack</p>
+                <p className="text-xs text-slate-400 mt-1 max-w-md">
+                  Extracting frames with OpenCV, detecting persons (COCO class 0), generating temporary TRK IDs, and encoding annotated MP4 playback.
+                </p>
+              </div>
+            ) : uploadedVideo && activeVideoSrc ? (
               <video
+                key={activeVideoSrc}
                 ref={videoRef}
-                src={uploadedVideo.streamUrl}
+                src={activeVideoSrc}
                 controls
                 autoPlay
                 loop
@@ -472,9 +678,9 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
                     'Stream failed to respond. Verify local Python edge connector and DVR/NVR network.'}
                 </p>
               </div>
-            ) : visionServiceStatus.connected && liveMjpegUrl && !liveMjpegFailed ? (
+            ) : liveMjpegActive ? (
               <img
-                src={liveMjpegUrl}
+                src={liveMjpegUrl!}
                 alt={`Live YOLOv8 MJPEG stream for ${selectedCamera?.cameraName || 'camera'}`}
                 onError={() => setLiveMjpegFailed(true)}
                 className="w-full h-full object-contain bg-black"
@@ -483,11 +689,11 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
               <div className="w-full h-full relative bg-slate-900 flex items-end justify-start p-4">
                 <div className="bg-slate-950/85 border border-slate-800 rounded-lg px-3.5 py-2.5 max-w-xl">
                   <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
-                    <Wifi className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <Wifi className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                     <span>
                       {selectedCamera?.sourceType === 'HDMI'
-                        ? 'HDMI Monitor Capture Stream (Simulated Demo Canvas)'
-                        : 'RTSP Store Feed (Simulated Demo Canvas)'}
+                        ? 'HDMI Monitor Capture (DEMO SIMULATION · Not Live Camera)'
+                        : 'RTSP Store Feed (DEMO SIMULATION · Not Live Camera)'}
                     </span>
                   </div>
                   <p className="text-xs text-slate-400 mt-1">
@@ -497,8 +703,8 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
               </div>
             )}
 
-            {/* SVG Zone & Detection Bounding Box Overlay */}
-            {!showRawFeed && (
+            {/* SVG Zone & Detection Overlay: never render synthetic boxes over real YOLO annotated video */}
+            {!showRawFeed && !uploading && uploadedVideo?.inferenceState !== 'live_yolo' && (
               <svg
                 viewBox="0 0 1000 1000"
                 preserveAspectRatio="none"
@@ -538,7 +744,7 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
                 })}
 
                 {selectedCamera?.connectionStatus !== 'offline' &&
-                  demoDetections.map((det) => (
+                  activeDetections.map((det) => (
                     <g key={det.trackId}>
                       <rect
                         x={det.x}
@@ -546,15 +752,21 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
                         width={det.w}
                         height={det.h}
                         fill="none"
-                        stroke="#3B82F6"
+                        stroke={det.isDemoData ? '#F59E0B' : '#10B981'}
                         strokeWidth={3}
                       />
-                      <rect x={det.x} y={Math.max(0, det.y - 34)} width={210} height={32} fill="#1E293B" />
+                      <rect
+                        x={det.x}
+                        y={Math.max(0, det.y - 34)}
+                        width={250}
+                        height={32}
+                        fill={det.isDemoData ? '#78350F' : '#064E3B'}
+                      />
                       <text
                         x={det.x + 8}
                         y={Math.max(22, det.y - 11)}
                         fill="#F8FAFC"
-                        fontSize="20"
+                        fontSize="19"
                         fontFamily="JetBrains Mono, monospace"
                       >
                         {det.trackId} · {(det.confidence * 100).toFixed(0)}%
@@ -568,30 +780,74 @@ export const LiveCameraPlayer: React.FC<LiveCameraPlayerProps> = ({
           {/* Live Inference Telemetry Strip */}
           <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
             <div>
-              <span className="text-slate-500">Visitor Detections</span>
+              <span className="text-slate-500">
+                {uiState === 'demo_overlay' ? 'Visitor Detections (DEMO DATA)' : 'Visitor Detections'}
+              </span>
               <p className="font-mono font-semibold text-slate-900 tabular-nums mt-0.5">
-                {selectedCamera?.connectionStatus === 'offline' ? 0 : demoDetections.length} persons
+                {visitorCountDisplay} persons
               </p>
             </div>
             <div>
-              <span className="text-slate-500">Stream FPS</span>
+              <span className="text-slate-500">Measured FPS</span>
               <p className="font-mono font-semibold text-slate-900 tabular-nums mt-0.5">
-                {playbackState === 'running' ? `${selectedCamera?.fps || 15} FPS` : '0 FPS'}
+                {fpsDisplay}
               </p>
             </div>
             <div>
               <span className="text-slate-500">Inference Latency</span>
               <p className="font-mono font-semibold text-slate-900 tabular-nums mt-0.5">
-                {visionServiceStatus.connected ? `${modelConfig.lastInferenceMs} ms` : 'Demo Overlay'}
+                {latencyDisplay}
               </p>
             </div>
             <div>
-              <span className="text-slate-500">Temporary IDs</span>
+              <span className="text-slate-500">Temporary Track IDs</span>
               <p className="font-mono font-semibold text-slate-900 truncate mt-0.5">
-                {demoDetections.map((d) => d.trackId).join(', ') || 'None'}
+                {activeTrackIdsDisplay}
               </p>
             </div>
           </div>
+
+          {/* Real Uploaded Video Inference Metrics Table */}
+          {uploadMetrics && (
+            <div className="px-4 py-3 bg-emerald-50/50 border-t border-emerald-200 space-y-2 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold text-emerald-900">
+                  Verified Python YOLOv8n + ByteTrack Run ({uploadMetrics.framesProcessed} / {uploadMetrics.framesTotal} frames · {uploadMetrics.totalDetections} person detections · {uploadMetrics.eventsDispatched} events synced)
+                </span>
+                <span className="font-mono text-emerald-800">
+                  Device: {uploadMetrics.device} · Model: {uploadMetrics.model}
+                </span>
+              </div>
+              {uploadMetrics.detectionsSample.length > 0 && (
+                <div className="overflow-x-auto bg-white border border-emerald-200 rounded-lg">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-slate-500">
+                        <th className="py-1.5 px-3 font-medium">Track ID</th>
+                        <th className="py-1.5 px-3 font-medium">Confidence</th>
+                        <th className="py-1.5 px-3 font-medium">Frame</th>
+                        <th className="py-1.5 px-3 font-medium">Zone</th>
+                        <th className="py-1.5 px-3 font-medium">Latency</th>
+                        <th className="py-1.5 px-3 font-medium">Timestamp</th>
+                      </tr>
+                    </thead>
+                    <tbody className="font-mono">
+                      {uploadMetrics.detectionsSample.slice(0, 6).map((sample, idx) => (
+                        <tr key={`${sample.temporaryTrackId}-${sample.frameNumber}-${idx}`} className="border-b border-slate-100 last:border-b-0">
+                          <td className="py-1.5 px-3 text-slate-900 font-semibold">{sample.temporaryTrackId}</td>
+                          <td className="py-1.5 px-3 text-slate-700">{(sample.confidence * 100).toFixed(1)}%</td>
+                          <td className="py-1.5 px-3 text-slate-700">#{sample.frameNumber}</td>
+                          <td className="py-1.5 px-3 text-slate-700">{sample.zoneName || 'Floor'}</td>
+                          <td className="py-1.5 px-3 text-slate-700">{sample.latencyMs ?? uploadMetrics.inferenceMs} ms</td>
+                          <td className="py-1.5 px-3 text-slate-500">{new Date(sample.timestamp).toLocaleTimeString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Zone Configuration Bar (Developer & Owner Only) */}
           {canEditZones && selectedCamera && (

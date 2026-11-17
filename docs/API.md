@@ -24,9 +24,9 @@ All authenticated endpoints require:
 - `POST /api/transactions` (`WORKER` for assigned outlet | `CLIENT_OWNER` | `DEVELOPER`) — Manually confirms payment with duplicate guard and immutable audit log.
 - `PATCH /api/transactions/:transactionId/status` (`CLIENT_OWNER` | `DEVELOPER`) — Cancels or refunds a confirmed payment with mandatory reason.
 - `POST /api/reports/generate` (`CLIENT_OWNER` | `DEVELOPER`) — Generates `daily`, `weekly`, or `monthly` reports in each outlet's local timezone.
-- `POST /api/vision/upload` (Authenticated actor with outlet access) — Accepts temporary MP4/AVI/MOV/WEBM file (auto-purged after 30m) and returns a ticketed `/api/vision/stream/:uploadId?ticket=...` URL.
-- `GET /api/vision/stream/:uploadId` (Bearer auth or scoped `ticket` query) — Streams uploaded test video only to authorized callers for that tenant/outlet.
-- `POST /api/vision/events` (`x-edge-api-key` required) — Outbound webhook receiving YOLOv8n + ByteTrack events from Python edge service. Rejects missing (`401`), invalid (`403`), or unconfigured (`503`) `EDGE_API_KEY`, and enforces camera-to-tenant/outlet ownership.
+- `POST /api/vision/upload` (Authenticated actor with outlet access) — Accepts temporary MP4/AVI/MOV/WEBM file (auto-purged after retention period), validates tenant/outlet/camera ownership, forwards multipart video + `x-edge-api-key` server-to-server to `${VISION_SERVICE_URL}/upload-video` for YOLOv8n + ByteTrack inference, and returns metrics + ticketed `/api/vision/stream/:uploadId` and `/api/vision/annotated/:uploadId` playback URLs.
+- `GET /api/vision/stream/:uploadId` & `GET /api/vision/annotated/:uploadId` (Bearer auth or scoped `ticket` query) — Stream temporary raw and Python-annotated MP4 test videos with byte-range seeking strictly to authorized callers for that tenant/outlet.
+- `POST /api/vision/events` (`x-edge-api-key` required) — Outbound webhook receiving YOLOv8n + ByteTrack events (`bbox`, `latencyMs`, `temporaryTrackId`, `confidence`, `frameNumber`, `zoneName`) from Python edge service. Rejects missing (`401`), invalid (`403`), or unconfigured (`503`) `EDGE_API_KEY`, and enforces camera-to-tenant/outlet ownership.
 - `PATCH /api/model/config` (`DEVELOPER` only) — Updates YOLO variant and confidence threshold (and syncs to `VISION_SERVICE_URL` with `x-edge-api-key` when configured).
 
 ## WebSocket Channel (`/ws`)

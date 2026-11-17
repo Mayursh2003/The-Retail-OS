@@ -242,10 +242,18 @@ export const apiClient = {
       body: JSON.stringify(payload),
     }),
 
-  uploadTestVideo: (session: AuthSessionHeaders, file: File, outletId: string) => {
+  uploadTestVideo: (
+    session: AuthSessionHeaders,
+    file: File,
+    outletId: string,
+    cameraId?: string
+  ) => {
     const formData = new FormData();
     formData.append('video', file);
     formData.append('outletId', outletId);
+    if (cameraId) {
+      formData.append('cameraId', cameraId);
+    }
     return requestJson<UploadedTestVideo>('/api/vision/upload', session, {
       method: 'POST',
       body: formData,

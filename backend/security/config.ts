@@ -159,7 +159,7 @@ export function rotateCameraSecrets(params: {
 }
 
 export interface StreamTicketPayload {
-  kind: 'mjpeg' | 'upload';
+  kind: 'mjpeg' | 'upload' | 'upload-annotated';
   resourceId: string;
   userId: string;
   tenantId: string;
