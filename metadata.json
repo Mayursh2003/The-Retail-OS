@@ -1,0 +1,6 @@
+{
+  "name": "Retail Brain OS",
+  "description": "Multi-tenant retail CCTV intelligence, anonymous visitor session analytics, manual payment confirmation, and automated outlet reporting platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

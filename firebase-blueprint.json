@@ -1,0 +1,215 @@
+{
+  "entities": {
+    "Tenant": {
+      "title": "Tenant",
+      "description": "Independent retail business customer account owning one or more physical outlets.",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "ownerUserId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "subscriptionPlan": { "type": "string", "enum": ["starter", "growth", "enterprise"] },
+        "status": { "type": "string", "enum": ["active", "suspended", "pending"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["tenantId", "businessName", "ownerUserId", "subscriptionPlan", "status", "createdAt", "updatedAt"]
+    },
+    "Outlet": {
+      "title": "Outlet",
+      "description": "Physical retail store location belonging to a tenant.",
+      "type": "object",
+      "properties": {
+        "outletId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "outletName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "address": { "type": "string", "minLength": 2, "maxLength": 240 },
+        "city": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "timezone": { "type": "string", "minLength": 3, "maxLength": 64 },
+        "closingTime": { "type": "string", "pattern": "^([01]\\d|2[0-3]):([0-5]\\d)$", "maxLength": 5 },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["outletId", "tenantId", "outletName", "address", "timezone", "status", "createdAt", "updatedAt"]
+    },
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Role-based user authorization record without raw PII.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["DEVELOPER", "CLIENT_OWNER", "WORKER"] },
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "assignedOutletIds": { "type": "array", "description": "Up to 20 assigned outlet IDs" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "accountStatus": { "type": "string", "enum": ["active", "disabled", "invited"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "role", "tenantId", "assignedOutletIds", "displayName", "accountStatus", "createdAt", "updatedAt"]
+    },
+    "UserPrivateContact": {
+      "title": "UserPrivateContact",
+      "description": "Isolated PII contact document for a user.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 24 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "email", "updatedAt"]
+    },
+    "Camera": {
+      "title": "Camera",
+      "description": "CCTV camera metadata scoped to tenant and outlet without credentials.",
+      "type": "object",
+      "properties": {
+        "cameraId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "outletId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "cameraName": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "sourceType": { "type": "string", "enum": ["RTSP", "HDMI", "UPLOAD"] },
+        "resolution": { "type": "string", "maxLength": 32 },
+        "fps": { "type": "number" },
+        "connectionStatus": { "type": "string", "enum": ["online", "offline", "degraded"] },
+        "aiProcessingStatus": { "type": "string", "enum": ["running", "paused", "stopped"] },
+        "lastSeen": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["cameraId", "tenantId", "outletId", "cameraName", "sourceType", "connectionStatus", "aiProcessingStatus", "createdAt", "updatedAt"]
+    },
+    "VisitSession": {
+      "title": "VisitSession",
+      "description": "Anonymous temporary visitor session derived from ByteTrack tracking IDs.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "outletId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "cameraId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "temporaryTrackId": { "type": "string", "minLength": 2, "maxLength": 32, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "firstSeen": { "type": "string", "format": "date-time" },
+        "lastSeen": { "type": "string", "format": "date-time" },
+        "dwellSeconds": { "type": "number" },
+        "sessionStatus": { "type": "string", "enum": ["active", "billing_zone", "exited", "uncertain"] },
+        "paymentStatus": { "type": "string", "enum": ["pending", "confirmed", "not_linked"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sessionId", "tenantId", "outletId", "cameraId", "temporaryTrackId", "firstSeen", "lastSeen", "dwellSeconds", "sessionStatus", "paymentStatus", "createdAt", "updatedAt"]
+    },
+    "DetectionEvent": {
+      "title": "DetectionEvent",
+      "description": "Single person-detection event emitted by the computer vision service.",
+      "type": "object",
+      "properties": {
+        "eventId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "outletId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sessionId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "eventType": { "type": "string", "enum": ["entry", "exit", "zone_dwell", "billing_zone_enter"] },
+        "confidence": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["eventId", "tenantId", "outletId", "sessionId", "eventType", "confidence", "timestamp", "createdAt"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Manually confirmed store transaction recorded by an authorized worker or owner.",
+      "type": "object",
+      "properties": {
+        "transactionId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "outletId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sessionId": { "type": "string", "maxLength": 64 },
+        "amount": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["UPI", "Cash", "Card", "Other"] },
+        "paymentStatus": { "type": "string", "enum": ["confirmed", "cancelled", "refunded"] },
+        "transactionRef": { "type": "string", "maxLength": 80 },
+        "confirmedBy": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionId", "tenantId", "outletId", "amount", "paymentMethod", "paymentStatus", "confirmedBy", "createdAt", "updatedAt"]
+    },
+    "Report": {
+      "title": "Report",
+      "description": "Aggregated daily, weekly, or monthly outlet operational and sales report.",
+      "type": "object",
+      "properties": {
+        "reportId": { "type": "string", "minLength": 2, "maxLength": 80, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "outletId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reportType": { "type": "string", "enum": ["daily", "weekly", "monthly"] },
+        "reportDate": { "type": "string", "maxLength": 32 },
+        "totalVisitors": { "type": "number" },
+        "confirmedTransactions": { "type": "number" },
+        "totalRevenue": { "type": "number" },
+        "averageBillValue": { "type": "number" },
+        "conversionRate": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["reportId", "tenantId", "outletId", "reportType", "reportDate", "totalVisitors", "confirmedTransactions", "totalRevenue", "averageBillValue", "conversionRate", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable security and operational audit trail entry.",
+      "type": "object",
+      "properties": {
+        "logId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tenantId": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "action": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "resource": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["logId", "userId", "tenantId", "action", "resource", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/tenants/{tenantId}": {
+      "schema": { "$ref": "#/entities/Tenant" },
+      "description": "Top-level retail business tenant records."
+    },
+    "/outlets/{outletId}": {
+      "schema": { "$ref": "#/entities/Outlet" },
+      "description": "Store outlet locations scoped to tenantId."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserAccount" },
+      "description": "RBAC user profiles scoped by role and tenantId."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivateContact" },
+      "description": "Isolated PII contact details readable only by owner or developer."
+    },
+    "/cameras/{cameraId}": {
+      "schema": { "$ref": "#/entities/Camera" },
+      "description": "Camera metadata and zone definitions without credentials."
+    },
+    "/visitSessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/VisitSession" },
+      "description": "Anonymous temporary visitor sessions scoped to tenant and outlet."
+    },
+    "/detectionEvents/{eventId}": {
+      "schema": { "$ref": "#/entities/DetectionEvent" },
+      "description": "CV detection telemetry events scoped to tenant and outlet."
+    },
+    "/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/Transaction" },
+      "description": "Manually confirmed store payment records."
+    },
+    "/reports/{reportId}": {
+      "schema": { "$ref": "#/entities/Report" },
+      "description": "Automated daily, weekly, and monthly store reports."
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Append-only operational and payment audit logs."
+    }
+  }
+}

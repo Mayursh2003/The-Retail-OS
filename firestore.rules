@@ -1,0 +1,449 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ------------------------------------------------------------------
+    // Shared Primitives
+    // ------------------------------------------------------------------
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 2 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'mayursharma.bkbiet2025@gmail.com';
+    }
+
+    function isDeveloper() {
+      return isBootstrappedAdmin() || (
+        isVerifiedUser() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function hasUserProfile() {
+      return isVerifiedUser() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function currentUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isActiveUser() {
+      return hasUserProfile() && currentUserData().accountStatus == 'active';
+    }
+
+    function isClientOwner(tenantId) {
+      return isActiveUser() &&
+        currentUserData().role == 'CLIENT_OWNER' &&
+        currentUserData().tenantId == tenantId;
+    }
+
+    function isTenantMember(tenantId) {
+      return isActiveUser() &&
+        currentUserData().tenantId == tenantId &&
+        (currentUserData().role == 'CLIENT_OWNER' || currentUserData().role == 'WORKER');
+    }
+
+    function isAssignedWorker(tenantId, outletId) {
+      return isActiveUser() &&
+        currentUserData().role == 'WORKER' &&
+        currentUserData().tenantId == tenantId &&
+        currentUserData().assignedOutletIds is list &&
+        (outletId in currentUserData().assignedOutletIds);
+    }
+
+    function canAccessOutlet(tenantId, outletId) {
+      return isDeveloper() || isClientOwner(tenantId) || isAssignedWorker(tenantId, outletId);
+    }
+
+    // ------------------------------------------------------------------
+    // Entity Validation Blueprints
+    // ------------------------------------------------------------------
+    function isValidTenant(data) {
+      return data.keys().hasAll(['tenantId', 'businessName', 'ownerUserId', 'subscriptionPlan', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['tenantId', 'businessName', 'ownerUserId', 'subscriptionPlan', 'status', 'createdAt', 'updatedAt']) &&
+        isValidId(data.tenantId) &&
+        data.businessName is string && data.businessName.size() >= 2 && data.businessName.size() <= 120 &&
+        isValidId(data.ownerUserId) &&
+        data.subscriptionPlan in ['starter', 'growth', 'enterprise'] &&
+        data.status in ['active', 'suspended', 'pending'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidOutlet(data) {
+      return data.keys().hasAll(['outletId', 'tenantId', 'outletName', 'address', 'timezone', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['outletId', 'tenantId', 'outletName', 'address', 'city', 'timezone', 'closingTime', 'status', 'createdAt', 'updatedAt']) &&
+        isValidId(data.outletId) &&
+        isValidId(data.tenantId) &&
+        data.outletName is string && data.outletName.size() >= 2 && data.outletName.size() <= 120 &&
+        data.address is string && data.address.size() >= 2 && data.address.size() <= 240 &&
+        (!('city' in data) || (data.city is string && data.city.size() >= 2 && data.city.size() <= 80)) &&
+        data.timezone is string && data.timezone.size() >= 3 && data.timezone.size() <= 64 &&
+        (!('closingTime' in data) || (data.closingTime is string && data.closingTime.size() == 5 && data.closingTime.matches('^([01]\\d|2[0-3]):([0-5]\\d)$'))) &&
+        data.status in ['active', 'inactive'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidUserAccount(data) {
+      return data.keys().hasAll(['userId', 'role', 'tenantId', 'assignedOutletIds', 'displayName', 'accountStatus', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['userId', 'role', 'tenantId', 'assignedOutletIds', 'displayName', 'accountStatus', 'createdAt', 'updatedAt']) &&
+        isValidId(data.userId) &&
+        data.role in ['DEVELOPER', 'CLIENT_OWNER', 'WORKER'] &&
+        isValidId(data.tenantId) &&
+        data.assignedOutletIds is list && data.assignedOutletIds.size() <= 20 &&
+        (data.assignedOutletIds.size() == 0 || data.assignedOutletIds[0] is string) &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+        data.accountStatus in ['active', 'disabled', 'invited'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateContact(data) {
+      return data.keys().hasAll(['userId', 'email', 'updatedAt']) &&
+        data.keys().hasOnly(['userId', 'email', 'phone', 'updatedAt']) &&
+        isValidId(data.userId) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 24)) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCamera(data) {
+      return data.keys().hasAll(['cameraId', 'tenantId', 'outletId', 'cameraName', 'sourceType', 'connectionStatus', 'aiProcessingStatus', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['cameraId', 'tenantId', 'outletId', 'cameraName', 'sourceType', 'resolution', 'fps', 'connectionStatus', 'aiProcessingStatus', 'lastSeen', 'zones', 'createdAt', 'updatedAt']) &&
+        isValidId(data.cameraId) &&
+        isValidId(data.tenantId) &&
+        isValidId(data.outletId) &&
+        data.cameraName is string && data.cameraName.size() >= 2 && data.cameraName.size() <= 100 &&
+        data.sourceType in ['RTSP', 'HDMI', 'UPLOAD'] &&
+        (!('resolution' in data) || (data.resolution is string && data.resolution.size() <= 32)) &&
+        (!('fps' in data) || (data.fps is number && data.fps >= 0 && data.fps <= 120)) &&
+        data.connectionStatus in ['online', 'offline', 'degraded'] &&
+        data.aiProcessingStatus in ['running', 'paused', 'stopped'] &&
+        (!('lastSeen' in data) || data.lastSeen is timestamp) &&
+        (!('zones' in data) || (data.zones is list && data.zones.size() <= 10 && (data.zones.size() == 0 || data.zones[0] is map))) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidVisitSession(data) {
+      return data.keys().hasAll(['sessionId', 'tenantId', 'outletId', 'cameraId', 'temporaryTrackId', 'firstSeen', 'lastSeen', 'dwellSeconds', 'sessionStatus', 'paymentStatus', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['sessionId', 'tenantId', 'outletId', 'cameraId', 'temporaryTrackId', 'firstSeen', 'lastSeen', 'dwellSeconds', 'sessionStatus', 'paymentStatus', 'zoneName', 'isDemoData', 'createdAt', 'updatedAt']) &&
+        isValidId(data.sessionId) &&
+        isValidId(data.tenantId) &&
+        isValidId(data.outletId) &&
+        isValidId(data.cameraId) &&
+        isValidId(data.temporaryTrackId) &&
+        data.firstSeen is timestamp &&
+        data.lastSeen is timestamp &&
+        data.dwellSeconds is number && data.dwellSeconds >= 0 && data.dwellSeconds <= 86400 &&
+        data.sessionStatus in ['active', 'billing_zone', 'exited', 'uncertain'] &&
+        data.paymentStatus in ['pending', 'confirmed', 'not_linked'] &&
+        (!('zoneName' in data) || (data.zoneName is string && data.zoneName.size() <= 64)) &&
+        (!('isDemoData' in data) || data.isDemoData is bool) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidDetectionEvent(data) {
+      return data.keys().hasAll(['eventId', 'tenantId', 'outletId', 'sessionId', 'eventType', 'confidence', 'timestamp', 'createdAt']) &&
+        data.keys().hasOnly(['eventId', 'tenantId', 'outletId', 'cameraId', 'sessionId', 'temporaryTrackId', 'eventType', 'confidence', 'frameNumber', 'zoneName', 'timestamp', 'createdAt']) &&
+        isValidId(data.eventId) &&
+        isValidId(data.tenantId) &&
+        isValidId(data.outletId) &&
+        (!('cameraId' in data) || isValidId(data.cameraId)) &&
+        isValidId(data.sessionId) &&
+        (!('temporaryTrackId' in data) || isValidId(data.temporaryTrackId)) &&
+        data.eventType in ['entry', 'exit', 'zone_dwell', 'billing_zone_enter'] &&
+        data.confidence is number && data.confidence >= 0 && data.confidence <= 1 &&
+        (!('frameNumber' in data) || (data.frameNumber is number && data.frameNumber >= 0)) &&
+        (!('zoneName' in data) || (data.zoneName is string && data.zoneName.size() <= 64)) &&
+        data.timestamp is timestamp &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['transactionId', 'tenantId', 'outletId', 'amount', 'paymentMethod', 'paymentStatus', 'confirmedBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transactionId', 'tenantId', 'outletId', 'sessionId', 'amount', 'paymentMethod', 'paymentStatus', 'transactionRef', 'confirmedBy', 'confirmedByName', 'notes', 'isDemoData', 'createdAt', 'updatedAt']) &&
+        isValidId(data.transactionId) &&
+        isValidId(data.tenantId) &&
+        isValidId(data.outletId) &&
+        (!('sessionId' in data) || (data.sessionId is string && data.sessionId.size() <= 64)) &&
+        data.amount is number && data.amount > 0 && data.amount <= 10000000 &&
+        data.paymentMethod in ['UPI', 'Cash', 'Card', 'Other'] &&
+        data.paymentStatus in ['confirmed', 'cancelled', 'refunded'] &&
+        (!('transactionRef' in data) || (data.transactionRef is string && data.transactionRef.size() <= 80)) &&
+        isValidId(data.confirmedBy) &&
+        (!('confirmedByName' in data) || (data.confirmedByName is string && data.confirmedByName.size() <= 100)) &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 280)) &&
+        (!('isDemoData' in data) || data.isDemoData is bool) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidReport(data) {
+      return data.keys().hasAll(['reportId', 'tenantId', 'outletId', 'reportType', 'reportDate', 'totalVisitors', 'confirmedTransactions', 'totalRevenue', 'averageBillValue', 'conversionRate', 'createdAt']) &&
+        data.keys().hasOnly(['reportId', 'tenantId', 'outletId', 'reportType', 'reportDate', 'timezone', 'totalVisitors', 'billingZoneVisits', 'confirmedTransactions', 'totalRevenue', 'averageBillValue', 'conversionRate', 'averageDwellSeconds', 'peakHour', 'cameraDowntimeMinutes', 'hourlyFootfall', 'createdAt']) &&
+        isValidId(data.reportId) &&
+        isValidId(data.tenantId) &&
+        isValidId(data.outletId) &&
+        data.reportType in ['daily', 'weekly', 'monthly'] &&
+        data.reportDate is string && data.reportDate.size() >= 4 && data.reportDate.size() <= 32 &&
+        (!('timezone' in data) || (data.timezone is string && data.timezone.size() <= 64)) &&
+        data.totalVisitors is number && data.totalVisitors >= 0 &&
+        (!('billingZoneVisits' in data) || (data.billingZoneVisits is number && data.billingZoneVisits >= 0)) &&
+        data.confirmedTransactions is number && data.confirmedTransactions >= 0 &&
+        data.totalRevenue is number && data.totalRevenue >= 0 &&
+        data.averageBillValue is number && data.averageBillValue >= 0 &&
+        data.conversionRate is number && data.conversionRate >= 0 && data.conversionRate <= 100 &&
+        (!('averageDwellSeconds' in data) || (data.averageDwellSeconds is number && data.averageDwellSeconds >= 0)) &&
+        (!('peakHour' in data) || (data.peakHour is string && data.peakHour.size() <= 16)) &&
+        (!('cameraDowntimeMinutes' in data) || (data.cameraDowntimeMinutes is number && data.cameraDowntimeMinutes >= 0)) &&
+        (!('hourlyFootfall' in data) || (data.hourlyFootfall is list && data.hourlyFootfall.size() <= 24 && (data.hourlyFootfall.size() == 0 || data.hourlyFootfall[0] is map))) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['logId', 'userId', 'tenantId', 'action', 'resource', 'timestamp']) &&
+        data.keys().hasOnly(['logId', 'userId', 'userEmail', 'tenantId', 'action', 'resource', 'details', 'timestamp']) &&
+        isValidId(data.logId) &&
+        isValidId(data.userId) &&
+        (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() <= 160)) &&
+        isValidId(data.tenantId) &&
+        data.action is string && data.action.size() >= 2 && data.action.size() <= 100 &&
+        data.resource is string && data.resource.size() >= 2 && data.resource.size() <= 120 &&
+        (!('details' in data) || (data.details is string && data.details.size() <= 500)) &&
+        data.timestamp is timestamp;
+    }
+
+    // ------------------------------------------------------------------
+    // Collection Match Rules
+    // ------------------------------------------------------------------
+    match /test/connection {
+      allow get: if isSignedIn();
+    }
+
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && request.auth.uid == adminId;
+      allow list, create, update, delete: if false;
+    }
+
+    match /tenants/{tenantId} {
+      allow get: if isValidId(tenantId) && (isDeveloper() || isTenantMember(tenantId));
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(tenantId) && isDeveloper() && isValidTenant(incoming()) &&
+        incoming().tenantId == tenantId && incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isValidId(tenantId) && isDeveloper() && isValidTenant(incoming()) &&
+        incoming().tenantId == existing().tenantId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['businessName', 'ownerUserId', 'subscriptionPlan', 'status', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /outlets/{outletId} {
+      allow get: if isValidId(outletId) && (isDeveloper() || isClientOwner(existing().tenantId) || isAssignedWorker(existing().tenantId, outletId));
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(outletId) && isValidOutlet(incoming()) &&
+        exists(/databases/$(database)/documents/tenants/$(incoming().tenantId)) &&
+        (isDeveloper() || isClientOwner(incoming().tenantId)) &&
+        incoming().outletId == outletId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(outletId) && isValidOutlet(incoming()) &&
+        (isDeveloper() || isClientOwner(existing().tenantId)) &&
+        incoming().outletId == existing().outletId &&
+        incoming().tenantId == existing().tenantId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['outletName', 'address', 'city', 'timezone', 'closingTime', 'status', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (
+        request.auth.uid == userId ||
+        isDeveloper() ||
+        isClientOwner(existing().tenantId)
+      );
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isValidId(userId) && isValidUserAccount(incoming()) &&
+        incoming().userId == userId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (
+          isDeveloper() ||
+          (isClientOwner(incoming().tenantId) && incoming().role == 'WORKER')
+        );
+      allow update: if isValidId(userId) && isValidUserAccount(incoming()) &&
+        incoming().userId == existing().userId &&
+        incoming().tenantId == existing().tenantId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isDeveloper() ||
+          (
+            isClientOwner(existing().tenantId) &&
+            existing().role == 'WORKER' &&
+            incoming().role == 'WORKER' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['assignedOutletIds', 'displayName', 'accountStatus', 'updatedAt'])
+          ) ||
+          (
+            isActiveUser() &&
+            request.auth.uid == userId &&
+            incoming().role == existing().role &&
+            incoming().accountStatus == existing().accountStatus &&
+            incoming().assignedOutletIds == existing().assignedOutletIds &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+
+      match /private/{docId} {
+        allow get: if isValidId(userId) && isValidId(docId) && (request.auth.uid == userId || isDeveloper());
+        allow list: if false;
+        allow create, update: if isValidId(userId) && isValidId(docId) && isValidUserPrivateContact(incoming()) &&
+          incoming().userId == userId &&
+          incoming().updatedAt == request.time &&
+          (request.auth.uid == userId || isDeveloper());
+        allow delete: if false;
+      }
+    }
+
+    match /invitations/{invitationId} {
+      allow get: if isValidId(invitationId) && isDeveloper();
+      allow list: if isBootstrappedAdmin();
+      allow create, update, delete: if false;
+    }
+
+    match /cameras/{cameraId} {
+      allow get: if isValidId(cameraId) && canAccessOutlet(existing().tenantId, existing().outletId);
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(cameraId) && isValidCamera(incoming()) &&
+        exists(/databases/$(database)/documents/outlets/$(incoming().outletId)) &&
+        (isDeveloper() || isClientOwner(incoming().tenantId)) &&
+        incoming().cameraId == cameraId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(cameraId) && isValidCamera(incoming()) &&
+        (isDeveloper() || isClientOwner(existing().tenantId)) &&
+        incoming().cameraId == existing().cameraId &&
+        incoming().tenantId == existing().tenantId &&
+        incoming().outletId == existing().outletId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['cameraName', 'resolution', 'fps', 'connectionStatus', 'aiProcessingStatus', 'lastSeen', 'zones', 'updatedAt']);
+      allow delete: if isValidId(cameraId) && isDeveloper();
+
+      match /secrets/{secretId} {
+        allow read, write: if false;
+      }
+    }
+
+    match /visitSessions/{sessionId} {
+      allow get: if isValidId(sessionId) && canAccessOutlet(existing().tenantId, existing().outletId);
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(sessionId) && isValidVisitSession(incoming()) &&
+        exists(/databases/$(database)/documents/outlets/$(incoming().outletId)) &&
+        canAccessOutlet(incoming().tenantId, incoming().outletId) &&
+        incoming().sessionId == sessionId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(sessionId) && isValidVisitSession(incoming()) &&
+        canAccessOutlet(existing().tenantId, existing().outletId) &&
+        incoming().sessionId == existing().sessionId &&
+        incoming().tenantId == existing().tenantId &&
+        incoming().outletId == existing().outletId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['lastSeen', 'dwellSeconds', 'sessionStatus', 'paymentStatus', 'zoneName', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /detectionEvents/{eventId} {
+      allow get: if isValidId(eventId) && canAccessOutlet(existing().tenantId, existing().outletId);
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(eventId) && isValidDetectionEvent(incoming()) &&
+        exists(/databases/$(database)/documents/outlets/$(incoming().outletId)) &&
+        canAccessOutlet(incoming().tenantId, incoming().outletId) &&
+        incoming().eventId == eventId &&
+        incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    match /transactions/{transactionId} {
+      allow get: if isValidId(transactionId) && canAccessOutlet(existing().tenantId, existing().outletId);
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(transactionId) && isValidTransaction(incoming()) &&
+        exists(/databases/$(database)/documents/outlets/$(incoming().outletId)) &&
+        canAccessOutlet(incoming().tenantId, incoming().outletId) &&
+        incoming().confirmedBy == request.auth.uid &&
+        incoming().paymentStatus == 'confirmed' &&
+        incoming().transactionId == transactionId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(transactionId) && isValidTransaction(incoming()) &&
+        (
+          isDeveloper() ||
+          (
+            isClientOwner(existing().tenantId) &&
+            existing().paymentStatus == 'confirmed' &&
+            incoming().paymentStatus in ['cancelled', 'refunded']
+          )
+        ) &&
+        incoming().transactionId == existing().transactionId &&
+        incoming().tenantId == existing().tenantId &&
+        incoming().outletId == existing().outletId &&
+        incoming().amount == existing().amount &&
+        incoming().confirmedBy == existing().confirmedBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['paymentStatus', 'notes', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /reports/{reportId} {
+      allow get: if isValidId(reportId) && (isDeveloper() || isClientOwner(existing().tenantId));
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(reportId) && isValidReport(incoming()) &&
+        exists(/databases/$(database)/documents/outlets/$(incoming().outletId)) &&
+        (isDeveloper() || isClientOwner(incoming().tenantId)) &&
+        incoming().reportId == reportId &&
+        incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    match /auditLogs/{logId} {
+      allow get: if isValidId(logId) && (isDeveloper() || isClientOwner(existing().tenantId));
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(logId) && isValidAuditLog(incoming()) &&
+        incoming().userId == request.auth.uid &&
+        incoming().logId == logId &&
+        incoming().timestamp == request.time &&
+        (isDeveloper() || isTenantMember(incoming().tenantId));
+      allow update, delete: if false;
+    }
+  }
+}
